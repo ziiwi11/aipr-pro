@@ -1,0 +1,37 @@
+.DS_Store
+node_modules/
+release-macos/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.env.*
+*.pem
+*.key
+migration-data/
+browser_profiles/
+Cookies
+Login Data
+*.log
+outputs/
+*.dmg
+*.zip
+*.xlsx
+*.csv
+
+# 编辑备份文件（代码改动前的时间戳副本）
+*.bak
+*.bak-*
+*.bak2-*
+*.bak3-*
+*.bak4-*
+*.bak5-*
+
+# 构建产物
+release-windows/
+app/frontend/node_modules/
+
+# 测试产物
+coverage/
+.vitest/

@@ -1,14 +1,34 @@
 # AIPR Pro 达人运营系统
 
-macOS Apple Silicon 桌面项目，包含 Electron 主进程、Python 采集与审核后端、前端发布资源、测试和构建脚本。
+macOS Apple Silicon / Windows x64 双平台桌面项目，包含 Electron 主进程、Python 采集与审核后端、前端发布资源、测试和构建脚本。
+
+## 平台支持
+
+| 平台 | 架构 | 状态 |
+|---|---|---|
+| macOS | arm64 (M 系列) | ✅ 已构建验证 |
+| Windows | x64 | ✅ 配置就绪（见 [WINDOWS-BUILD.md](WINDOWS-BUILD.md)）|
+| macOS | x64 (Intel) | ❌ 不支持 |
+| Windows | arm64 | ❌ 不支持 |
+
+平台判定逻辑见 `app/electron/platform-runtime.cjs`：
+
+```javascript
+const supported = (platform === "darwin" && arch === "arm64")
+               || (platform === "win32" && arch === "x64");
+```
 
 ## 项目完整性
 
-此版本整理自 M1 迁移工程。`app/dist` 是现有前端编译产物及增量界面脚本；原始 React/Vue/TypeScript 前端工程不在当前材料中。因此可以打包现有界面，但不能从原始前端源码重新生成该 bundle。Python 运行环境在每台机器上安装，DMG 不包含完整 Python 解释器。
+此版本整理自 M1 迁移工程。`app/dist` 是现有前端编译产物及增量界面脚本；原始 React/Vue/TypeScript 前端工程不在当前材料中。因此可以打包现有界面，但不能从原始前端源码重新生成该 bundle。Python 运行环境在每台机器上安装，安装包不包含完整 Python 解释器。
 
 ## 安装与构建
 
-需要 Apple Silicon Mac、arm64 Node.js 20+、npm、arm64 Python 3.12，以及安装于 Applications 的 Google Chrome 或 Chromium。构建会联网下载 npm 和 Python 依赖。
+**macOS**：需要 Apple Silicon Mac、arm64 Node.js 20+、npm、arm64 Python 3.12，以及安装于 Applications 的 Google Chrome 或 Chromium。
+
+**Windows**：需要 Windows 10/11 x64、Node.js 20+、Python 3.12（准备运行时用）、系统 Chrome 或 Edge。详见 [WINDOWS-BUILD.md](WINDOWS-BUILD.md)。
+
+构建会联网下载 npm 和 Python 依赖。
 
 ```bash
 uname -m
