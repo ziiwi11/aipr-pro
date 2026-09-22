@@ -1,0 +1,11 @@
+#!/bin/bash
+set -e
+
+USER_PYTHON="$HOME/Library/Application Support/AIPR Pro 达人运营系统/runtime/python/bin/python3"
+
+if [[ ! -x "$USER_PYTHON" ]]; then
+  echo "AIPR Pro 的 Mac Python 运行环境尚未安装。请先运行迁移包中的 01-构建并安装-M1.command。" >&2
+  exit 127
+fi
+
+exec "$USER_PYTHON" "$@"
