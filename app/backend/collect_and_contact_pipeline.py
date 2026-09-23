@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import queue
+import random
 import subprocess
 import sys
+import time
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -458,6 +460,63 @@ def run_stream(
     return code, events
 
 
+def run_collection_with_retry(
+    command: list[str],
+    *,
+    max_retries: int = 3,
+    rate_limit_backoff_ms: int = 240_000,
+    base_backoff_ms: int = 5_000,
+    sleeper: Callable[[float], None] | None = None,
+) -> tuple[int, list[dict]]:
+    """采集遇平台限流时按指数退避重试。
+
+    实测数据：连续揭示约 44 次后触发软限流，约 4 分钟后自动恢复。
+    因此限流类错误使用 240s 基数，普通错误用 5s。
+
+    返回 (最终退出码, 所有轮次的事件列表)。
+    """
+    sleep = sleeper or time.sleep
+    all_events: list[dict] = []
+    last_code = 0
+
+    for attempt in range(1, max_retries + 1):
+        code, events = run_stream(command, idle_timeout_seconds=90)
+        all_events.extend(events)
+        last_code = code
+
+        if code != 9:
+            return code, all_events
+
+        # 9 = pipeline_platform_paused（平台限流）
+        limited_event = next(
+            (e for e in reversed(events) if e.get("status") == "pipeline_platform_paused"),
+            {},
+        )
+        if attempt >= max_retries:
+            emit({
+                "status": "collection_retry_exhausted",
+                "attempts": attempt,
+                "message": "采集多次遇平台限流，已停止重试",
+            })
+            return code, all_events
+
+        backoff_ms = rate_limit_backoff_ms * (2 ** (attempt - 1))
+        jitter_ms = random.randint(0, 5000)
+        wait_ms = backoff_ms + jitter_ms
+        emit({
+            "status": "collection_retry_scheduled",
+            "attempt": attempt,
+            "next_attempt": attempt + 1,
+            "backoff_ms": backoff_ms,
+            "jitter_ms": jitter_ms,
+            "source_status": limited_event.get("source_status", ""),
+            "message": f"平台限流，{wait_ms / 1000:.0f} 秒后重试",
+        })
+        sleep(wait_ms / 1000)
+
+    return last_code, all_events
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--strategy", required=True)
@@ -547,16 +606,15 @@ def main() -> None:
             similar_attempted = True
             emit({"status": "collection_resumed", **resumed})
         elif not collection.get("verified_seed_only"):
-            collect_code, events = run_stream([
+            # 用带退避的包装：平台限流（退出码 9）时自动重试，
+            # 而不是直接让整条 pipeline 失败。
+            collect_code, events = run_collection_with_retry([
                 sys.executable, str(collector),
                 "--strategy", str(strategy_path),
                 "--out-dir", str(output_dir),
                 "--shop-a", args.shop_a,
                 "--shop-b", args.shop_b,
-            ], idle_timeout_seconds=90, recover_on_idle=lambda: recover_completed_collection(
-                output_dir / "aipr_collection_highwater.json",
-                strategy,
-            ))
+            ])
             collection = next((event for event in reversed(events) if event.get("status") == "collection_finished"), None)
         if collect_code or not collection or not collection.get("output"):
             emit({"status": "pipeline_error", "message": "达人采集未生成可用候选池"})

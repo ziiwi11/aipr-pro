@@ -67,6 +67,32 @@ def merge_robot_queue(target: Path, records: list[dict[str, Any]]) -> None:
     target.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in merged.values()), encoding="utf-8")
 
 
+def _manifest_roi(roi: Any) -> dict[str, Any]:
+    """从 ROI 报告中提取交接清单需要的摘要字段。"""
+    if not isinstance(roi, dict) or roi.get("error"):
+        return {"available": False, "reason": (roi or {}).get("error", "not_computed")}
+    funnel = roi.get("funnel") or {}
+    contacts = roi.get("contacts") or {}
+    return {
+        "available": True,
+        "funnel": {
+            "candidates": funnel.get("candidates", 0),
+            "verified": funnel.get("verified", 0),
+            "qualified": funnel.get("qualified", 0),
+            "revealed": funnel.get("revealed", 0),
+            "delivered": funnel.get("delivered", 0),
+        },
+        "rates": funnel.get("rates") or {},
+        "contacts": {
+            "withContact": contacts.get("with_contact", 0),
+            "phone": contacts.get("phone", 0),
+            "wechat": contacts.get("wechat", 0),
+            "contactRate": contacts.get("contact_rate", "0.0"),
+        },
+        "risk": roi.get("risk") or {},
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
@@ -78,6 +104,10 @@ def main() -> None:
     parser.add_argument("--robot-queue", default="")
     parser.add_argument("--contacts-only", action="store_true")
     parser.add_argument("--require-strict-highwater", action="store_true")
+    # ROI 看板参数（可选，用于成本与速率估算）
+    parser.add_argument("--budget", type=float, default=0, help="任务预算（用于成本估算）")
+    parser.add_argument("--cost-per-reveal", type=float, default=0, help="单次联系方式揭示的估算成本")
+    parser.add_argument("--elapsed-minutes", type=float, default=0, help="本次采集耗时（用于速率）")
     args = parser.parse_args()
 
     source = Path(args.input).resolve()
@@ -123,6 +153,23 @@ def main() -> None:
     delivery["strict_selected_count"] = int(payload.get("strict_selected_count") or len(qualified))
     delivery["strict_audit"] = payload.get("audit") or {}
     delivery["delivery_mode"] = "contacts-only" if args.contacts_only else "robot-handoff"
+
+    # ROI 转化看板：对完整候选集（含未入选）计算漏斗，
+    # 这样能看到从候选到交付的真实转化率，而不只是最终名单的计数。
+    try:
+        from roi_dashboard import build_roi
+        all_candidates = payload.get("candidates") or []
+        elapsed = float(getattr(args, "elapsed_minutes", 0) or 0)
+        delivery["roi"] = build_roi(all_candidates, {
+            "id": args.task_id,
+            "name": args.task_name,
+            "budget": float(getattr(args, "budget", 0) or 0),
+            "cost_per_reveal": float(getattr(args, "cost_per_reveal", 0) or 0),
+            "elapsed_minutes": elapsed,
+        })
+    except Exception as exc:  # ROI 失败不应阻断交付
+        delivery["roi"] = {"error": str(exc)[:200]}
+
     robot_records = [] if args.contacts_only else list(delivery.get("robot_queue") or [])
     if args.contacts_only:
         delivery["robot_queue"] = []
@@ -192,6 +239,8 @@ def main() -> None:
             "phoneCount": delivery["phone_contact_count"],
             "robotRecordCount": len(robot_records),
         },
+        # ROI 摘要：交付方最关心的转化率与成本
+        "roi": _manifest_roi(delivery.get("roi")),
         "robot": {
             "contractVersion": delivery["robot_contract_version"],
             "modes": [] if args.contacts_only else ["ndjson", "batch-json", "ipc"],
