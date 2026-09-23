@@ -7,7 +7,7 @@
  *   .delivery-center-page / .settings-page / .shop-browser-page.full
  */
 
-import type { Bootstrap, CollectionStrategy, Creator, OutreachBatch } from "../types";
+import type { Bootstrap, CollectionStrategy, Creator, OutreachBatch, RoiFunnel } from "../types";
 import { fmtNum, fmtTime, h } from "../store";
 import { emptyHint, metric, panel, progressBar, rowItem, statusPill } from "./shell";
 import { renderStrategyForm } from "./strategy-form";
@@ -114,6 +114,72 @@ export function autoCollectPage(state: Bootstrap, handlers: PageHandlers): HTMLE
 
 // ---------- 2. 任务总览 ----------
 
+/** ROI 漏斗可视化：宽度按占候选总数的比例 */
+function roiFunnel(funnel: RoiFunnel): HTMLElement {
+  const stages: [string, number, string][] = [
+    ["候选达人", funnel.candidates, ""],
+    ["已验证", funnel.verified, funnel.rates.verify_rate],
+    ["预接触合格", funnel.qualified, funnel.rates.qualify_rate],
+    ["已揭示联系方式", funnel.revealed, funnel.rates.reveal_rate],
+    ["已交付", funnel.delivered, funnel.rates.deliver_rate],
+  ];
+  const max = Math.max(1, funnel.candidates);
+  const wrap = h("div", { class: "roi-funnel" });
+  for (const [label, value, rate] of stages) {
+    const pct = Math.round((value / max) * 100);
+    const bar = h("div", { class: "funnel-bar" });
+    bar.style.width = `${Math.max(2, pct)}%`;
+    wrap.append(
+      h("div", { class: "funnel-row" }, [
+        h("span", { class: "funnel-label", text: label }),
+        h("div", { class: "funnel-track" }, [bar]),
+        h("span", { class: "funnel-value", text: `${fmtNum(value)}${rate ? ` · ${rate}%` : ""}` }),
+      ]),
+    );
+  }
+  return wrap;
+}
+
+function roiPanel(state: Bootstrap): HTMLElement | null {
+  const roi = state.deliveryCenter?.roi;
+  if (!roi || roi.error || !roi.funnel) return null;
+
+  const f = roi.funnel;
+  const c = roi.contacts;
+  const children: Node[] = [
+    roiFunnel(f),
+    h("div", { class: "metric-grid" }, [
+      metric("端到端转化", Number(f.rates.end_to_end_rate) || 0),
+      metric("联系方式获取率", Number(c?.contact_rate) || 0),
+      metric("手机", c?.phone),
+      metric("微信", c?.wechat),
+    ]),
+  ];
+
+  if (roi.throughput) {
+    children.push(
+      h("div", { class: "empty-hint",
+        text: `速率：${roi.throughput.reveals_per_minute} 次/分钟 · 每次 ${roi.throughput.seconds_per_reveal ?? "-"} 秒 · 耗时 ${roi.throughput.elapsed_minutes} 分钟` }),
+    );
+  }
+  const cost = roi.roi;
+  if (cost && cost.estimated_spent) {
+    children.push(
+      h("div", { class: "empty-hint",
+        text: `成本：估算花费 ${cost.estimated_spent} · 单联系人 ${cost.cost_per_revealed_contact ?? "-"} · 单交付 ${cost.cost_per_delivered ?? "-"}` }),
+    );
+  }
+  const risk = roi.risk;
+  if (risk && (risk.rate_limited || risk.not_revealed || risk.failed)) {
+    children.push(
+      h("div", { class: "empty-hint",
+        text: `风控：触发限流 ${risk.rate_limited ?? 0} · 未揭示 ${risk.not_revealed ?? 0} · 失败 ${risk.failed ?? 0}` }),
+    );
+  }
+
+  return panel("ROI 转化漏斗", ...children);
+}
+
 export function dashboardPage(state: Bootstrap): HTMLElement {
   const t = state.task;
   const flow = state.realtimeFlow;
@@ -144,6 +210,7 @@ export function dashboardPage(state: Bootstrap): HTMLElement {
         metric("手机", t.phone),
       ]),
     ),
+    ...(roiPanel(state) ? [roiPanel(state) as HTMLElement] : []),
     panel("运行历史",
       ...((state.runHistory ?? []).slice(0, 8).map((r) =>
         rowItem(fmtTime(r.startedAt), `${r.status ?? "-"} · ${fmtNum(r.listedCount)} 人`),

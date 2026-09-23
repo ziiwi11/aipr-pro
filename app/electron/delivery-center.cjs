@@ -49,6 +49,10 @@ function discoverDeliveryArtifacts(deliveryPath) {
     robotContractVersion: String(delivery.robot_contract_version || ""),
     createdAt: String(delivery.created_at || ""),
   };
+  // ROI 转化看板：交付物里若含 roi 段则透传给前端（缺失时不影响其他功能）
+  if (delivery.roi && typeof delivery.roi === "object" && !delivery.roi.error) {
+    result.roi = delivery.roi;
+  }
   result.readiness = buildRehearsalReadiness(result);
   return result;
 }

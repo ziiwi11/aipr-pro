@@ -152,10 +152,59 @@ export interface DeliveryArtifacts {
   [key: string]: string | undefined;
 }
 
+export interface RoiFunnel {
+  candidates: number;
+  verified: number;
+  qualified: number;
+  revealed: number;
+  delivered: number;
+  rates: {
+    verify_rate: string;
+    qualify_rate: string;
+    reveal_rate: string;
+    deliver_rate: string;
+    end_to_end_rate: string;
+  };
+}
+
+export interface RoiContacts {
+  with_contact: number;
+  phone: number;
+  wechat: number;
+  only_phone: number;
+  only_wechat: number;
+  both_phone_and_wechat: number;
+  contact_rate: string;
+}
+
+export interface RoiReport {
+  generated_at?: string;
+  funnel?: RoiFunnel;
+  contacts?: RoiContacts;
+  levels?: Record<string, number>;
+  categories?: Record<string, number>;
+  risk?: Record<string, number>;
+  roi?: {
+    budget?: number;
+    estimated_spent?: number;
+    budget_remaining?: number | null;
+    budget_utilization?: string | null;
+    cost_per_revealed_contact?: number | null;
+    cost_per_delivered?: number | null;
+  };
+  throughput?: {
+    elapsed_minutes: number;
+    reveals_per_minute: number;
+    seconds_per_reveal: number | null;
+  } | null;
+  error?: string;
+}
+
 export interface DeliveryCenter {
   available: boolean;
   artifacts: DeliveryArtifacts;
   metrics?: Record<string, number>;
+  roi?: RoiReport;
   [key: string]: unknown;
 }
 

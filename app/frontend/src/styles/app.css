@@ -324,3 +324,45 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   .app-shell { grid-template-columns: 1fr; }
   .sidebar { width: 100%; }
 }
+
+/* ---------- ROI 转化漏斗 ---------- */
+
+.roi-funnel {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.funnel-row {
+  display: grid;
+  grid-template-columns: 110px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.funnel-label {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.funnel-track {
+  height: 18px;
+  background: #eef1ef;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.funnel-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), #4ea87a);
+  border-radius: 5px;
+  transition: width 0.3s ease;
+}
+
+.funnel-value {
+  min-width: 92px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

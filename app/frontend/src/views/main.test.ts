@@ -345,3 +345,81 @@ describe("renderError / renderLoading", () => {
     expect(root.querySelector(".loading")?.textContent).toContain("加载");
   });
 });
+
+describe("ROI 转化漏斗面板", () => {
+  const roiReport = {
+    generated_at: "2026-09-23T00:00:00Z",
+    funnel: {
+      candidates: 100, verified: 80, qualified: 60, revealed: 50, delivered: 20,
+      rates: {
+        verify_rate: "80.0", qualify_rate: "75.0", reveal_rate: "83.3",
+        deliver_rate: "40.0", end_to_end_rate: "20.0",
+      },
+    },
+    contacts: {
+      with_contact: 50, phone: 40, wechat: 10,
+      only_phone: 40, only_wechat: 10, both_phone_and_wechat: 0,
+      contact_rate: "50.0",
+    },
+    risk: { rate_limited: 3, not_revealed: 1, failed: 0 },
+    throughput: { elapsed_minutes: 10, reveals_per_minute: 5, seconds_per_reveal: 12 },
+  };
+
+  function withRoi() {
+    const b = makeBootstrap();
+    b.deliveryCenter = { available: true, artifacts: {}, roi: roiReport as never };
+    return b;
+  }
+
+  it("有 ROI 数据时渲染漏斗面板", () => {
+    setCurrentPage("dashboard");
+    const root = render(withRoi());
+    expect(root.querySelector(".roi-funnel")).toBeTruthy();
+    expect(root.querySelectorAll(".funnel-row").length).toBe(5);
+  });
+
+  it("漏斗显示五个阶段标签", () => {
+    setCurrentPage("dashboard");
+    const root = render(withRoi());
+    const labels = [...root.querySelectorAll(".funnel-label")].map((e) => e.textContent);
+    expect(labels).toEqual(["候选达人", "已验证", "预接触合格", "已揭示联系方式", "已交付"]);
+  });
+
+  it("漏斗条宽度按比例（候选最宽）", () => {
+    setCurrentPage("dashboard");
+    const root = render(withRoi());
+    const bars = [...root.querySelectorAll<HTMLElement>(".funnel-bar")];
+    expect(bars.length).toBe(5);
+    expect(bars[0].style.width).toBe("100%");
+    // 已交付 20/100 = 20%
+    expect(bars[4].style.width).toBe("20%");
+  });
+
+  it("显示端到端转化率", () => {
+    setCurrentPage("dashboard");
+    const root = render(withRoi());
+    const text = root.querySelector(".roi-funnel")?.parentElement?.textContent ?? "";
+    expect(text).toContain("20");
+  });
+
+  it("显示风控统计", () => {
+    setCurrentPage("dashboard");
+    const root = render(withRoi());
+    const text = root.textContent ?? "";
+    expect(text).toContain("触发限流");
+  });
+
+  it("无 ROI 数据时不渲染面板", () => {
+    setCurrentPage("dashboard");
+    const root = render(makeBootstrap());
+    expect(root.querySelector(".roi-funnel")).toBeFalsy();
+  });
+
+  it("ROI 含 error 时不渲染", () => {
+    setCurrentPage("dashboard");
+    const b = makeBootstrap();
+    b.deliveryCenter = { available: true, artifacts: {}, roi: { error: "boom" } as never };
+    const root = render(b);
+    expect(root.querySelector(".roi-funnel")).toBeFalsy();
+  });
+});
