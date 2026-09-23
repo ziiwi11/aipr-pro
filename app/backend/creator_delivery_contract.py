@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import json
 from datetime import datetime
 from typing import Any, Iterable
 
@@ -543,6 +544,13 @@ def build_delivery(
             "验证结论": "主页与内容已验证" if candidate.get("content_evidence_reviewed") else "待内容复核",
             "分跑店铺": _plain(candidate, "shop", "lip_shop"),
         }
+        if __package__:
+            from .creator_jev import review as jev_review
+        else:
+            from creator_jev import review as jev_review
+        advisory = jev_review(candidate, rules, 'aipr-pro')
+        if advisory.get('enabled'):
+            row['Jev内容复核'] = json.dumps(advisory, ensure_ascii=False)
         rows.append(row)
         if evaluation["decision"] == "推荐建联" and contact:
             robot_queue.append({
