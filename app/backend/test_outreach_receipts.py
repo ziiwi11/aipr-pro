@@ -24,7 +24,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from outreach_receipts import (  # noqa: E402
     ReceiptLedger,
     TransitionError,
+    apply_receipts_to_robot_queue,
     can_transition,
+    ingest_robot_events,
     merge_receipts_into_rows,
 )
 
@@ -228,6 +230,104 @@ class ConcurrencyTest(unittest.TestCase):
             t.join()
         self.assertEqual(len(ledger.latest_by_event()), 30)
         self.assertEqual(ledger.summary()["by_state"]["sent"], 30)
+
+
+
+
+class IngestRobotEventsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.ledger = ReceiptLedger()
+
+    def test_accepts_valid_events(self) -> None:
+        events = [
+            {"eventId": "t:u1", "state": "sent", "channel": "wechat"},
+            {"eventId": "t:u2", "state": "requested"},
+        ]
+        r = ingest_robot_events(events, self.ledger)
+        self.assertEqual(r, {"accepted": 2, "skipped": 0, "invalid": 0})
+        self.assertEqual(self.ledger.current_state("t:u1"), "sent")
+
+    def test_rejects_malformed_events(self) -> None:
+        events = [
+            {"state": "sent"},              # 缺 eventId
+            {"eventId": "t:u1"},            # 缺 state
+            {"eventId": "t:u2", "state": "bogus"},  # 非法 state
+            "not a dict",
+        ]
+        r = ingest_robot_events(events, self.ledger)
+        self.assertEqual(r["invalid"], 4)
+        self.assertEqual(r["accepted"], 0)
+
+    def test_out_of_order_skipped_by_default_lenient(self) -> None:
+        """默认宽松：乱序回传也能落账。"""
+        events = [
+            {"eventId": "t:u1", "state": "replied"},
+        ]
+        r = ingest_robot_events(events, self.ledger)
+        self.assertEqual(r["accepted"], 1)
+        self.assertEqual(self.ledger.current_state("t:u1"), "replied")
+
+    def test_strict_mode_skips_illegal_transition(self) -> None:
+        self.ledger.record("t:u1", "requested")
+        events = [{"eventId": "t:u1", "state": "replied"}]  # requested → replied 非法
+        r = ingest_robot_events(events, self.ledger, enforce_transition=True)
+        self.assertEqual(r["skipped"], 1)
+        self.assertEqual(self.ledger.current_state("t:u1"), "requested")
+
+    def test_empty_events(self) -> None:
+        r = ingest_robot_events([], self.ledger)
+        self.assertEqual(r, {"accepted": 0, "skipped": 0, "invalid": 0})
+
+
+class ApplyToRobotQueueTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.ledger = ReceiptLedger()
+
+    def test_backfills_receipt(self) -> None:
+        self.ledger.record("t:u1", "sent", channel="wechat")
+        records = [{"eventId": "t:u1", "status": "pending", "creator": {"id": "u1"}}]
+        out = apply_receipts_to_robot_queue(records, self.ledger)
+        self.assertEqual(out[0]["receipt"]["state"], "sent")
+        self.assertEqual(out[0]["receipt"]["channel"], "wechat")
+        self.assertEqual(out[0]["status"], "sent")
+        self.assertIsNotNone(out[0]["receipt"]["sentAt"])
+
+    def test_replied_sets_both_timestamps(self) -> None:
+        self.ledger.record("t:u1", "sent")
+        self.ledger.record("t:u1", "replied", note="同意")
+        out = apply_receipts_to_robot_queue([{"eventId": "t:u1"}], self.ledger)
+        self.assertEqual(out[0]["receipt"]["state"], "replied")
+        self.assertIsNotNone(out[0]["receipt"]["sentAt"])
+        self.assertIsNotNone(out[0]["receipt"]["repliedAt"])
+        self.assertEqual(out[0]["receipt"]["note"], "同意")
+
+    def test_records_without_receipt_unchanged(self) -> None:
+        records = [{"eventId": "t:unknown", "status": "pending"}]
+        out = apply_receipts_to_robot_queue(records, self.ledger)
+        self.assertEqual(out[0]["status"], "pending")
+        self.assertNotIn("receipt", out[0])
+
+    def test_other_fields_preserved(self) -> None:
+        self.ledger.record("t:u1", "sent")
+        records = [{
+            "eventId": "t:u1",
+            "creator": {"id": "u1", "name": "a"},
+            "guardrails": {"allowAutomaticSend": False},
+        }]
+        out = apply_receipts_to_robot_queue(records, self.ledger)
+        self.assertEqual(out[0]["creator"]["name"], "a")
+        self.assertFalse(out[0]["guardrails"]["allowAutomaticSend"])
+
+    def test_roundtrip_ingest_then_apply(self) -> None:
+        events = [
+            {"eventId": "t:u1", "state": "sent", "channel": "phone"},
+            {"eventId": "t:u1", "state": "replied", "note": "已报价"},
+        ]
+        ingest_robot_events(events, self.ledger)
+        out = apply_receipts_to_robot_queue([{"eventId": "t:u1"}], self.ledger)
+        self.assertEqual(out[0]["receipt"]["state"], "replied")
+        self.assertEqual(out[0]["receipt"]["channel"], "phone")
+        self.assertEqual(out[0]["receipt"]["note"], "已报价")
 
 
 if __name__ == "__main__":

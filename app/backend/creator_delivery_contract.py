@@ -580,6 +580,15 @@ def build_delivery(
                 },
                 "status": "pending",
                 "queuedAt": datetime.now().isoformat(timespec="seconds"),
+                # 回执追踪字段：机器人回传时填充，用于形成外联闭环。
+                # 初始为 null，不改变现有触达逻辑（allowAutomaticSend 仍为 False）。
+                "receipt": {
+                    "state": "requested",
+                    "channel": "",
+                    "sentAt": None,
+                    "repliedAt": None,
+                    "note": "",
+                },
             })
 
     plain = sum(1 for row in rows if row["明文联系方式"])

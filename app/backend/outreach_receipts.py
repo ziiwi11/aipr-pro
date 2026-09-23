@@ -248,3 +248,88 @@ def merge_receipts_into_rows(
 
 def dumps_summary(summary: dict[str, Any]) -> str:
     return json.dumps(summary, ensure_ascii=False, sort_keys=True)
+
+def ingest_robot_events(
+    events: Iterable[dict[str, Any]],
+    ledger: ReceiptLedger,
+    enforce_transition: bool = False,
+) -> dict[str, int]:
+    """把机器人回传事件写入回执账本。
+
+    机器人事件形如：
+        {"eventId": "task:uid", "state": "sent", "channel": "wechat", "note": "..."}
+
+    默认 enforce_transition=False：机器人可能乱序回传，强行校验会丢事件；
+    需要严格审计时传 True。
+
+    返回 {accepted, skipped, invalid}。
+    """
+    accepted = skipped = invalid = 0
+    for event in events:
+        if not isinstance(event, dict):
+            invalid += 1
+            continue
+        event_id = str(event.get("eventId") or "").strip()
+        state = str(event.get("state") or "").strip()
+        if not event_id or state not in STATES:
+            invalid += 1
+            continue
+        try:
+            ledger.record(
+                event_id,
+                state,
+                channel=str(event.get("channel") or ""),
+                note=str(event.get("note") or ""),
+                meta=event.get("meta") if isinstance(event.get("meta"), dict) else None,
+                enforce_transition=enforce_transition,
+            )
+            accepted += 1
+        except (TransitionError, ValueError):
+            skipped += 1
+    return {"accepted": accepted, "skipped": skipped, "invalid": invalid}
+
+
+def apply_receipts_to_robot_queue(
+    records: Iterable[dict[str, Any]],
+    ledger: ReceiptLedger,
+) -> list[dict[str, Any]]:
+    """把账本状态回填到机器人队列记录（不改变其他字段）。"""
+    latest = ledger.latest_by_event()
+    out: list[dict[str, Any]] = []
+    for record in records:
+        current = dict(record)
+        event_id = str(current.get("eventId") or "")
+        receipt = latest.get(event_id)
+        if receipt:
+            # 从完整历史里回填最近的非空 channel/note：
+            # 后续事件（如 replied）可能只带 state，不能因此丢掉已记录的渠道。
+            history = ledger.history(event_id)
+            last_channel = next((r.channel for r in reversed(history) if r.channel), "")
+            last_note = next((r.note for r in reversed(history) if r.note), "")
+            last_sent_at = next(
+                (r.at for r in reversed(history) if r.state in ("sent", "replied", "bounced")),
+                None,
+            )
+            last_replied_at = next(
+                (r.at for r in reversed(history) if r.state == "replied"), None
+            )
+            existing = current.get("receipt") if isinstance(current.get("receipt"), dict) else {}
+            # 空值不覆盖已有值：机器人可能只回传 state 而省略 channel/note
+            current["receipt"] = {
+                **existing,
+                "state": receipt.state,
+                "channel": last_channel or existing.get("channel") or "",
+                "note": last_note or existing.get("note") or "",
+                "sentAt": (
+                    time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(last_sent_at))
+                    if last_sent_at else None
+                ),
+                "repliedAt": (
+                    time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(last_replied_at))
+                    if last_replied_at else None
+                ),
+            }
+            # 同步顶层 status，便于机器人直接读取
+            current["status"] = receipt.state
+        out.append(current)
+    return out
