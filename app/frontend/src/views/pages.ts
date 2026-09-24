@@ -169,6 +169,14 @@ function roiPanel(state: Bootstrap): HTMLElement | null {
         text: `成本：估算花费 ${cost.estimated_spent} · 单联系人 ${cost.cost_per_revealed_contact ?? "-"} · 单交付 ${cost.cost_per_delivered ?? "-"}` }),
     );
   }
+  const jev = roi.jev;
+  if (jev && jev.enabled > 0) {
+    children.push(
+      h("div", { class: "empty-hint",
+        text: `JEV 复核（advisory）：覆盖 ${jev.coverage_rate}% · supported ${jev.supported_rate}% · uncertain ${jev.uncertain_rate}% · 置信度均值 ${jev.confidence.avg ?? "-"}` }),
+    );
+  }
+
   const risk = roi.risk;
   if (risk && (risk.rate_limited || risk.not_revealed || risk.failed)) {
     children.push(

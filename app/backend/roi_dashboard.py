@@ -166,6 +166,77 @@ def build_risk_breakdown(rows: Iterable[dict[str, Any]]) -> dict[str, int]:
     return out
 
 
+def _parse_jev(raw: Any) -> dict[str, Any] | None:
+    """解析交付行里的 Jev内容复核（可能是 JSON 字符串或 dict）。"""
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else None
+        except (json.JSONDecodeError, TypeError):
+            return None
+    return None
+
+
+def build_jev_breakdown(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """统计 JEV 内容复核的结论分布。
+
+    route 三种取值：
+      supported       — 作品证据支持当前项目内容方向
+      review_conflict — 作品与项目要求有明确冲突证据
+      uncertain       — 证据不足或无法确认（默认与降级值）
+
+    注意：这是 advisory 数据，不代表准入结论。
+    """
+    items = [r for r in rows if isinstance(r, dict)]
+    total = len(items)
+    enabled = 0
+    routes: dict[str, int] = {}
+    confidences: list[float] = []
+    backends: dict[str, int] = {}
+    cloud_errors = 0
+
+    for row in items:
+        jev = _parse_jev(row.get("Jev内容复核"))
+        if not jev or not jev.get("enabled"):
+            continue
+        enabled += 1
+        route = str(jev.get("route") or "unknown")
+        routes[route] = routes.get(route, 0) + 1
+        conf = jev.get("confidence")
+        if isinstance(conf, (int, float)):
+            confidences.append(float(conf))
+        integration = jev.get("integration")
+        if isinstance(integration, dict):
+            backend = str(integration.get("backend") or "unknown")
+            backends[backend] = backends.get(backend, 0) + 1
+            if integration.get("cloud_error"):
+                cloud_errors += 1
+
+    def rate(n: int, d: int) -> str:
+        return f"{n / d * 100:.1f}" if d > 0 else "0.0"
+
+    return {
+        "enabled": enabled,
+        "coverage_rate": rate(enabled, total),
+        "routes": routes,
+        "supported_rate": rate(routes.get("supported", 0), enabled),
+        "conflict_rate": rate(routes.get("review_conflict", 0), enabled),
+        "uncertain_rate": rate(routes.get("uncertain", 0), enabled),
+        "confidence": {
+            "count": len(confidences),
+            "min": round(min(confidences), 2) if confidences else None,
+            "max": round(max(confidences), 2) if confidences else None,
+            "avg": round(sum(confidences) / len(confidences), 2) if confidences else None,
+        },
+        "backends": backends,
+        "cloud_errors": cloud_errors,
+    }
+
+
 def build_roi(
     rows: Iterable[dict[str, Any]],
     task_meta: dict[str, Any] | None = None,
@@ -219,6 +290,7 @@ def build_roi(
         "levels": build_level_breakdown(items),
         "categories": build_category_breakdown(items),
         "risk": build_risk_breakdown(items),
+        "jev": build_jev_breakdown(items),
         "roi": roi,
         "throughput": throughput,
     }
@@ -257,6 +329,22 @@ def format_roi_text(report: dict[str, Any]) -> str:
         lines += ["", "【类目分布 Top】"]
         for cat, n in report["categories"].items():
             lines.append(f"  {cat[:14]:<16}{n:>6}")
+    jev = report.get("jev") or {}
+    if jev.get("enabled"):
+        lines += [
+            "",
+            "【JEV 内容复核】（advisory，不影响准入）",
+            f"  覆盖          {jev['enabled']:>6}   {jev['coverage_rate']}%",
+            f"  supported     {jev['routes'].get('supported', 0):>6}   {jev['supported_rate']}%",
+            f"  uncertain     {jev['routes'].get('uncertain', 0):>6}   {jev['uncertain_rate']}%",
+            f"  conflict      {jev['routes'].get('review_conflict', 0):>6}   {jev['conflict_rate']}%",
+        ]
+        conf = jev.get("confidence") or {}
+        if conf.get("avg") is not None:
+            lines.append(f"  置信度均值    {conf['avg']}（{conf['min']} ~ {conf['max']}）")
+        if jev.get("backends"):
+            lines.append(f"  后端          {jev['backends']}")
+
     risk = report.get("risk") or {}
     if any(risk.values()):
         lines += [

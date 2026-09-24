@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -21,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from roi_dashboard import (  # noqa: E402
     build_category_breakdown,
+    build_jev_breakdown,
     build_contact_breakdown,
     build_funnel,
     build_level_breakdown,
@@ -204,6 +206,94 @@ class TextRenderTest(unittest.TestCase):
     def test_renders_empty_report(self) -> None:
         text = format_roi_text(build_roi([], {}))
         self.assertIn("转化漏斗", text)
+
+
+
+
+class JevBreakdownTest(unittest.TestCase):
+    def _jev(self, route="uncertain", conf=0.5, backend="jev-cloud", enabled=True):
+        return json.dumps({
+            "enabled": enabled, "advisory_only": True, "needs_review": True,
+            "admission_changed": False, "auto_send_allowed": False,
+            "route": route, "confidence": conf,
+            "integration": {"backend": backend, "cloud_error": None},
+        }, ensure_ascii=False)
+
+    def test_empty(self) -> None:
+        j = build_jev_breakdown([])
+        self.assertEqual(j["enabled"], 0)
+        self.assertEqual(j["coverage_rate"], "0.0")
+
+    def test_no_jev_field(self) -> None:
+        j = build_jev_breakdown([{"identity": "a"}])
+        self.assertEqual(j["enabled"], 0)
+
+    def test_counts_routes(self) -> None:
+        rows = [
+            {"Jev内容复核": self._jev("supported", 0.9)},
+            {"Jev内容复核": self._jev("supported", 0.8)},
+            {"Jev内容复核": self._jev("uncertain", 0.3)},
+            {"Jev内容复核": self._jev("review_conflict", 0.7)},
+        ]
+        j = build_jev_breakdown(rows)
+        self.assertEqual(j["enabled"], 4)
+        self.assertEqual(j["routes"]["supported"], 2)
+        self.assertEqual(j["routes"]["uncertain"], 1)
+        self.assertEqual(j["routes"]["review_conflict"], 1)
+        self.assertEqual(j["supported_rate"], "50.0")
+        self.assertEqual(j["conflict_rate"], "25.0")
+
+    def test_accepts_dict_form(self) -> None:
+        """Jev内容复核 也可能是 dict（非 JSON 字符串）。"""
+        rows = [{"Jev内容复核": {"enabled": True, "route": "supported", "confidence": 0.9}}]
+        j = build_jev_breakdown(rows)
+        self.assertEqual(j["enabled"], 1)
+        self.assertEqual(j["routes"]["supported"], 1)
+
+    def test_ignores_disabled_and_malformed(self) -> None:
+        rows = [
+            {"Jev内容复核": self._jev(enabled=False)},
+            {"Jev内容复核": "not json"},
+            {"Jev内容复核": ""},
+            {"Jev内容复核": None},
+        ]
+        j = build_jev_breakdown(rows)
+        self.assertEqual(j["enabled"], 0)
+
+    def test_confidence_stats(self) -> None:
+        rows = [
+            {"Jev内容复核": self._jev("uncertain", 0.2)},
+            {"Jev内容复核": self._jev("uncertain", 0.6)},
+            {"Jev内容复核": self._jev("uncertain", 0.4)},
+        ]
+        j = build_jev_breakdown(rows)
+        self.assertEqual(j["confidence"]["min"], 0.2)
+        self.assertEqual(j["confidence"]["max"], 0.6)
+        self.assertEqual(j["confidence"]["avg"], 0.4)
+
+    def test_backend_breakdown(self) -> None:
+        rows = [
+            {"Jev内容复核": self._jev(backend="jev-cloud")},
+            {"Jev内容复核": self._jev(backend="local")},
+            {"Jev内容复核": self._jev(backend="jev-cloud")},
+        ]
+        j = build_jev_breakdown(rows)
+        self.assertEqual(j["backends"], {"jev-cloud": 2, "local": 1})
+
+    def test_coverage_rate(self) -> None:
+        rows = [{"Jev内容复核": self._jev()}, {"identity": "no-jev"}]
+        j = build_jev_breakdown(rows)
+        self.assertEqual(j["coverage_rate"], "50.0")
+
+    def test_included_in_build_roi(self) -> None:
+        report = build_roi([{"Jev内容复核": self._jev("supported")}], {})
+        self.assertIn("jev", report)
+        self.assertEqual(report["jev"]["enabled"], 1)
+
+    def test_text_renders_jev_section(self) -> None:
+        report = build_roi([{"Jev内容复核": self._jev("supported")}], {})
+        text = format_roi_text(report)
+        self.assertIn("JEV", text)
 
 
 if __name__ == "__main__":

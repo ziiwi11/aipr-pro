@@ -177,9 +177,22 @@ export interface RoiContacts {
   contact_rate: string;
 }
 
+export interface RoiJev {
+  enabled: number;
+  coverage_rate: string;
+  routes: Record<string, number>;
+  supported_rate: string;
+  conflict_rate: string;
+  uncertain_rate: string;
+  confidence: { count: number; min: number | null; max: number | null; avg: number | null };
+  backends: Record<string, number>;
+  cloud_errors: number;
+}
+
 export interface RoiReport {
   generated_at?: string;
   funnel?: RoiFunnel;
+  jev?: RoiJev;
   contacts?: RoiContacts;
   levels?: Record<string, number>;
   categories?: Record<string, number>;

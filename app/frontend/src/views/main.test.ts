@@ -362,6 +362,13 @@ describe("ROI 转化漏斗面板", () => {
       contact_rate: "50.0",
     },
     risk: { rate_limited: 3, not_revealed: 1, failed: 0 },
+    jev: {
+      enabled: 50, coverage_rate: "100.0",
+      routes: { supported: 10, uncertain: 40 },
+      supported_rate: "20.0", conflict_rate: "0.0", uncertain_rate: "80.0",
+      confidence: { count: 50, min: 0.1, max: 0.9, avg: 0.4 },
+      backends: { "jev-cloud": 50 }, cloud_errors: 0,
+    },
     throughput: { elapsed_minutes: 10, reveals_per_minute: 5, seconds_per_reveal: 12 },
   };
 
@@ -421,5 +428,13 @@ describe("ROI 转化漏斗面板", () => {
     b.deliveryCenter = { available: true, artifacts: {}, roi: { error: "boom" } as never };
     const root = render(b);
     expect(root.querySelector(".roi-funnel")).toBeFalsy();
+  });
+
+  it("显示 JEV 复核统计", () => {
+    setCurrentPage("dashboard");
+    const root = render(withRoi());
+    const text = root.textContent ?? "";
+    expect(text).toContain("JEV");
+    expect(text).toContain("20.0");
   });
 });
