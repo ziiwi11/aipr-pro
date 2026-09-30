@@ -548,7 +548,18 @@ def build_delivery(
             from .creator_jev import review as jev_review
         else:
             from creator_jev import review as jev_review
-        advisory = jev_review(candidate, rules, 'aipr-pro')
+        # 补齐 JEV 需要的证据字段（recent_titles / bio 等）。
+        # 候选数据里这些字段为空会导致大量 uncertain，实际内容藏在
+        # content_evidence 与 profile_text 中，这里提取后传入。
+        try:
+            if __package__:
+                from .jev_evidence import enrich_for_jev
+            else:
+                from jev_evidence import enrich_for_jev
+            jev_input = enrich_for_jev(candidate)
+        except Exception:
+            jev_input = candidate
+        advisory = jev_review(jev_input, rules, 'aipr-pro')
         if advisory.get('enabled'):
             row['Jev内容复核'] = json.dumps(advisory, ensure_ascii=False)
         rows.append(row)
