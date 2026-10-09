@@ -8,6 +8,10 @@ export function selectableCreators(creators = []) {
   return creators.filter(isOutreachEligible);
 }
 
+export function unavailableCreators(creators = []) {
+  return creators.filter(c=>!isOutreachEligible(c)).map(c=>({name:String(c.name||"未命名达人"),reason:String(c.email||c.plainContact||"").includes("@") ? "仅有邮箱，雷神建联需要微信或手机号" : "缺少可用微信或手机号"}));
+}
+
 export function previewSummary(preview = {}) {
   return `已选 ${preview.selectedCount || 0} · 可同步 ${preview.validCount || 0} · 缺失 ${preview.missingCount || 0} · 重复 ${preview.duplicateCount || 0} · 当前发送 0`;
 }
@@ -135,6 +139,8 @@ function render() {
   if (!panel) return;
   const creators = state.bootstrap?.creators || [];
   const eligible = selectableCreators(creators);
+  const unavailable=unavailableCreators(creators);
+  const loading = !state.bootstrap;
   const leishenStatus = state.outreach?.leishen?.status;
   const permission = state.outreach?.leishen?.permissions?.result || {};
   const online = leishenStatus?.online === true;
@@ -147,12 +153,13 @@ function render() {
     </header>
     <div class="aipr-ls-status-grid">
       ${metric("雷神连接", online ? "已连接" : "未连接", online ? "ready" : "pending")}
-      ${metric("候选名单", creators.length, "")}
-      ${metric("可建联", eligible.length, eligible.length ? "ready" : "pending")}
+      ${metric("候选名单", loading ? "读取中…" : creators.length, "")}
+      ${metric("可建联", loading ? "读取中…" : eligible.length, eligible.length ? "ready" : "pending")}
       ${metric("已选择", state.selected.size, state.selected.size ? "ready" : "")}
       ${metric("辅助功能", permission.accessibility === true ? "已授权" : "待授权", permission.accessibility === true ? "ready" : "pending")}
       ${metric("当前批次", batch?.status ? statusLabel(batch.status) : "未创建", batch?.status === "running" ? "ready" : "")}
     </div>
+    ${!loading && unavailable.length ? `<details class="aipr-ls-unavailable"><summary>${unavailable.length} 人暂不可建联 · 查看原因</summary><ul>${unavailable.map(c=>`<li>${escapeHtml(c.name)}：${escapeHtml(c.reason)}</li>`).join("")}</ul></details>` : ""}
     ${state.error ? `<div class="aipr-ls-error">${escapeHtml(state.error)}</div>` : ""}
     <div class="aipr-ls-actions">
       <button class="button secondary" data-action="select-all" ${!eligible.length ? "disabled" : ""}>全选可建联达人</button>
@@ -162,7 +169,7 @@ function render() {
     ${state.preview ? previewBlock(state.preview) : ""}
     ${batchBlock(batch, online)}
     <div class="aipr-ls-columns">
-      <section><h3>达人选择</h3><div class="aipr-ls-creator-list">${creatorRows(creators)}</div></section>
+      <section><h3>达人选择</h3><div class="aipr-ls-creator-list">${loading ? "<p role=\"status\">正在读取名单，请稍候…</p>" : creatorRows(creators)}</div></section>
       <section><h3>运行历史</h3><div class="aipr-ls-history">${historyRows(history)}</div></section>
     </div>`;
 }
@@ -176,13 +183,18 @@ function batchBlock(batch, online) {
   return `<div class="aipr-ls-batch"><div><strong>批次 ${escapeHtml(batch.batchId || "")}</strong><span>${escapeHtml(statusLabel(batch.status))} · ${batch.validCount || 0} 位达人</span></div><button class="button primary danger" data-action="start" ${batch.status === "synced" && online ? "" : "disabled"}>授权并开始 AI 建联</button></div>`;
 }
 
+export function displayDouyin(creator) {
+  const value=String(creator.douyinId || creator.douyin || "").trim();
+  return !value || /^v[0-9]+_[a-f0-9]{24,}/i.test(value) ? "抖音号未记录 · 详情见达人优选" : value;
+}
+
 function creatorRows(creators) {
   if (!creators.length) return '<div class="aipr-ls-empty">当前任务没有可显示名单。</div>';
   return creators.map((creator) => {
     const eligible = isOutreachEligible(creator);
     const id = String(creator.id || "");
     const checked = state.selected.has(id);
-    return `<label class="aipr-ls-creator ${eligible ? "" : "disabled"}"><input type="checkbox" data-creator-id="${escapeHtml(id)}" ${checked ? "checked" : ""} ${eligible ? "" : "disabled"}><span><strong>${escapeHtml(creator.name || "未命名达人")}</strong><small>${escapeHtml(creator.douyin || "待补抖音号")}</small></span><em>${eligible ? escapeHtml(maskedContact(creator)) : "缺少微信/手机号"}</em></label>`;
+    return `<label class="aipr-ls-creator ${eligible ? "" : "disabled"}"><input type="checkbox" data-creator-id="${escapeHtml(id)}" ${checked ? "checked" : ""} ${eligible ? "" : "disabled"}><span><strong>${escapeHtml(creator.name || "未命名达人")}</strong><small>${escapeHtml(displayDouyin(creator))}</small></span><em>${eligible ? escapeHtml(maskedContact(creator)) : "缺少微信/手机号"}</em></label>`;
   }).join("");
 }
 
@@ -202,11 +214,11 @@ function maskedContact(creator) {
 }
 
 function statusLabel(value) {
-  return ({ previewed: "待授权", authorized: "已授权", synced: "已同步待启动", running: "AI 建联运行中", checkpoint: "采集检查点", artifact: "交付文件" })[value] || String(value || "-");
+  return ({ previewed: "待授权", authorized: "已授权", synced: "已同步待启动", running: "AI 建联运行中", checkpoint: "采集检查点", artifact: "交付文件", paused:"已停止，保留断点", ended:"用户已结束", error:"作业异常", worker_starting:"准备作业", completed:"目标完成", finished:"本次作业结束" })[value] || (/progress/.test(String(value)) ? "采集与审核进行中" : "运行诊断记录");
 }
 
 function historyLabel(item) {
-  return ({ "outreach-previewed": "生成授权预览", "outreach-authorized": "批量授权", "leishen-synced": "同步到雷神", "leishen-started": "启动 AI 建联", "recovered-artifact": "恢复历史文件", started: "任务开始", finished: "任务结束" })[item.type] || item.type || "运行记录";
+  return ({ "outreach-previewed": "生成授权预览", "outreach-authorized": "批量授权", "leishen-synced": "同步到雷神", "leishen-started": "启动 AI 建联", "recovered-artifact": "恢复历史文件", started: "任务开始", finished: "任务结束", "worker-started":"作业进程已启动", paused:"作业已停止", error:"作业异常", "collection-idle-timeout":"长时间未进展" })[item.type] || (item.type === "progress" ? "采集与审核进度" : "运行诊断记录");
 }
 
 function formatTime(value) {
@@ -221,6 +233,6 @@ function escapeHtml(value) {
 
 function requireBridge() {
   const bridge = window.aiprDesktop;
-  if (!bridge?.getOutreachState || !bridge?.previewOutreachAuthorization) throw new Error("当前 AIPR 安装包尚未加载雷神接口");
+  if (!bridge?.getOutreachState || !bridge?.previewOutreachAuthorization) throw new Error("当前千寻安装包尚未加载雷神接口");
   return bridge;
 }

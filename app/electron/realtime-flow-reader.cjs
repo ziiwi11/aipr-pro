@@ -1,3 +1,4 @@
+const {readCachedJson}=require("./cached-file.cjs");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -7,14 +8,23 @@ function readRealtimeCreatorFlow(outputDir) {
   const flowPath = outputDir ? path.join(String(outputDir), "aipr_realtime_creator_flow.json") : "";
   if (!flowPath || !fs.existsSync(flowPath)) return emptySnapshot(flowPath);
   try {
-    const payload = JSON.parse(fs.readFileSync(flowPath, "utf8"));
+    const payload = readCachedJson(flowPath);
     const records = Array.isArray(payload.records)
       ? payload.records.filter((record) => record && typeof record === "object" && record.row && typeof record.row === "object")
       : [];
     const candidateRows = records.map((record) => ({ ...record.row, realtime_flow_state: record.state, realtime_flow_reason: record.reason || "" }));
-    const formalRows = records
+    let formalRows = records
       .filter((record) => record.state === "listed" && hasPlaintext(record.row))
       .map((record) => ({ ...record.row, realtime_flow_state: record.state, realtime_flow_reason: record.reason || "" }));
+    const strictPath = path.join(String(outputDir), "aipr_strict_contact_highwater.json");
+    if (fs.existsSync(strictPath)) {
+      // The audited delivery list is authoritative; flow state is processing history.
+      const strict = readCachedJson(strictPath);
+      formalRows = Array.isArray(strict.candidates)
+        ? strict.candidates.filter((row) => row && typeof row === "object" && hasPlaintext(row))
+          .map((row) => ({ ...row, realtime_flow_state: "listed" }))
+        : [];
+    }
     return {
       available: true,
       path: flowPath,
@@ -28,6 +38,8 @@ function readRealtimeCreatorFlow(outputDir) {
         contactRevealing: records.filter((record) => record.state === "contact_revealing").length,
         plaintext: records.filter((record) => hasPlaintext(record.row)).length,
         listed: formalRows.length,
+        wechat: formalRows.filter((row) => [row.buyin_contact_wechat, row.cart_contact_wechat, row.wechat, row["微信"]].some(validPlaintext)).length,
+        phone: formalRows.filter((row) => [row.buyin_contact_phone, row.cart_contact_phone, row.phone, row["手机号"]].some(validPlaintext)).length,
         rejected: records.filter((record) => [
           "duplicate_identity", "unsuitable", "insufficient_evidence", "not_authorized",
           "not_available", "duplicate_contact", "error",

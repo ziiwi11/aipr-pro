@@ -18,10 +18,15 @@ function mergeTaskHighWater(previous = {}, incoming = {}) {
   return merged;
 }
 
-function mergeTaskDeliverySnapshot(previous = {}, incoming = {}) {
+function mergeTaskDeliverySnapshot(previous = {}, incoming = {}, { preserveTarget = false } = {}) {
   const merged = mergeTaskHighWater(previous, incoming);
   for (const field of ["targetCount", "plainContacts", "wechat", "phone", "remaining"]) {
+    if (preserveTarget && ["targetCount", "remaining"].includes(field)) continue;
     if (finiteNumber(incoming[field]) !== null) merged[field] = number(incoming[field]);
+  }
+  if (preserveTarget) {
+    merged.targetCount = previous.targetCount;
+    merged.remaining = Math.max(0, number(previous.targetCount) - merged.plainContacts);
   }
   return merged;
 }

@@ -16,12 +16,27 @@ from collect_and_contact_pipeline import (
     run_stream,
     should_replenish_source_pool,
     merge_candidate_sources,
+    has_new_discovery_candidates,
     resumable_collection_pool,
     should_reuse_historical_contacts,
 )
 
 
 class PipelineReplenishmentTest(unittest.TestCase):
+    def test_repeated_discovery_alias_is_not_a_new_candidate(self):
+        saved = {"candidates": [{"identity": "old", "buyin_uid": "shared"}]}
+        repeated = {"candidates": [{"identity": "alias", "buyin_uid": "shared"}]}
+        self.assertFalse(has_new_discovery_candidates(repeated, saved))
+        self.assertFalse(has_new_discovery_candidates({"candidates": []}, saved))
+        self.assertTrue(has_new_discovery_candidates({"candidates": [{"identity": "new"}]}, saved))
+
+    def test_beauty_low_pool_expands_to_allowed_lifestyle_sources(self):
+        first = extend_low_pool_keywords([], 1, {"category": "美妆个护"})
+        later = extend_low_pool_keywords(first, 3, {"category": "美妆个护"})
+        self.assertGreater(len(later), len(first))
+        self.assertIn("生活好物", later)
+        self.assertNotIn("内衣试穿", later)
+
     def test_loads_only_strict_qualified_verified_candidate_seed_rows(self):
         import json
         import tempfile

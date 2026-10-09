@@ -48,7 +48,7 @@ def evidence_output_prefix(payload: dict[str, Any]) -> str:
 
 EVIDENCE_CONTRACT_VERSION = 4
 
-SAFETY_MARKERS = ("安全验证", "验证码", "访问过于频繁", "请求过于频繁", "稍后再试")
+SAFETY_MARKERS = ("安全验证", "验证码", "访问过于频繁", "请求过于频繁", "稍后再试", "当前环境存在风险")
 DOUYIN_LABELS = ("达人抖音主页", "抖音主页", "查看抖音主页", "达人主页")
 
 
@@ -101,6 +101,15 @@ def should_capture_evidence_screenshots(candidate: dict[str, Any]) -> bool:
 
 def apply_structured_beauty_evidence(candidate: dict[str, Any], keywords: list[str]) -> dict[str, Any]:
     current = dict(candidate)
+    # Discovery metadata must never replace already reviewed profile/content evidence.
+    if (
+        current.get("content_evidence_reviewed") is True
+        and current.get("evidence_status") == "verified"
+        and int(current.get("evidence_contract_version") or 0) >= EVIDENCE_CONTRACT_VERSION
+        and (current.get("evidence_gate") or {}).get("source") in {"buyin_profile", "douyin_homepage"}
+        and meaningful_lines("\n".join(current.get("content_evidence") or []), keywords)
+    ):
+        return current
     beauty_task = is_beauty_profile_candidate(current, keywords)
     category = compact(current.get("category") or current.get("main_category"))
     qualified = bool(
@@ -372,6 +381,10 @@ def verify_one(context, candidate: dict[str, Any], evidence_dir: Path, keywords:
             pass
         body = page.locator("body").inner_text(timeout=8000)
         compact_body = compact(body)
+        if any(marker in compact_body for marker in SAFETY_MARKERS):
+            current["content_evidence_reviewed"] = False
+            current["evidence_status"] = "rate_limited"
+            return current
         profile_content_match = re.search(r"(\d+)\s*发布内容总数", compact_body)
         profile_content_count = int(profile_content_match.group(1)) if profile_content_match else 0
         # 内容数为 0 时重载一次再读：平台页面偶发在数据区挂载前返回 0，
@@ -506,7 +519,7 @@ def merge_evidence_candidate_updates(
         if creator_identity(row)
     }
     fields = {
-        "content_evidence_reviewed", "content_evidence", "evidence_status",
+        "content_evidence_reviewed", "content_evidence", "content_evidence_source", "evidence_status",
         "evidence_contract_version", "evidence_error", "evidence_gate",
         "evidence_screenshot_error",
         "douyin_content_text", "douyin_homepage", "douyin_homepage_open_method",
@@ -618,6 +631,165 @@ def wait_for_lane_futures(futures: list[Any]) -> list[Exception]:
     return failures
 
 
+def saved_review_candidates(payload, previous, limit=20):
+    completed = {row.get("identity") for row in previous.get("records", []) if row.get("screenshots")}
+    return [row for row in payload.get("candidates", []) if isinstance(row, dict)
+            and not row.get("evidence_screenshots") and creator_identity(row) not in completed][:min(20, max(0, limit))]
+
+
+def compare_visible_contacts(candidate, visible):
+    result = {}
+    for channel in ("wechat", "phone", "email"):
+        saved = compact(candidate.get("buyin_contact_" + channel) or candidate.get("cart_contact_" + channel))
+        current = compact(visible.get(channel))
+        result[channel] = "platform_match" if saved and current and saved == current else "platform_mismatch" if saved and current else "not_visible"
+    return {"channels": result, "reachability": "unverified", "messages_sent": 0}
+
+
+def review_saved_screenshots(args, payload):
+    # Separate supplement: never rewrite the historical admission, model result,
+    # contacts, queues, or high-water files. No contact-reveal or model calls.
+    from contact_icons_single import contact_items, parse_contact_items
+    output = Path(args.out_dir).resolve()
+    report_path = output / "aipr_saved_evidence_review.json"
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        report = {"records": []}
+    selected = saved_review_candidates(payload, report, args.limit or 20)
+    report.update({"status": "running", "historical_data_changed": False,
+                   "reachability": "unverified", "messages_sent": 0, "model_calls": 0,
+                   "scope": "missing_screenshots_only", "selected_count": len(selected)})
+    evidence_dir = output / "evidence" / ("supplement-" + datetime.now().strftime("%Y%m%d-%H%M%S"))
+    def save():
+        report["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        atomic_write_json(report_path, report)
+    save()
+    emit({"status": "saved_review_started", "candidate_count": len(selected), "message": "缺失截图补核开始；不新增采集、不调用模型、不发送"})
+    if not selected:
+        report["status"] = "finished"
+        save()
+        return
+    endpoints = {"A": args.shop_a, "B": args.shop_b}
+    with sync_playwright() as playwright:
+        for shop in evidence_active_shops(payload):
+            try:
+                browser, context, page = connect_shop(playwright.chromium, endpoints[shop], timeout=15000)
+                page.set_viewport_size({"width": 1280, "height": 900})
+            except Exception:
+                continue
+            for candidate in list(selected):
+                identity = creator_identity(candidate)
+                review_input = dict(candidate)
+                review_input.pop("evidence_screenshot_error", None)
+                reviewed = verify_one(context, review_input, evidence_dir / safe_name(identity),
+                                      [compact(k) for k in json.loads(args.keywords_json)], page=page)
+                try:
+                    visible = parse_contact_items(contact_items(page)) if reviewed.get("profile_verified") else {}
+                except Exception:
+                    visible = {}
+                record = {"identity": identity, "checked_at": datetime.now().isoformat(timespec="seconds"),
+                          "screenshots": reviewed.get("evidence_screenshots") or [],
+                          "content_status": reviewed.get("evidence_status"),
+                          "observed_content_evidence": reviewed.get("content_evidence") or [],
+                          "contact_verification": compare_visible_contacts(candidate, visible),
+                          "manual_review_required": True,
+                          "failure": reviewed.get("evidence_error") or reviewed.get("evidence_screenshot_error") or ""}
+                report["records"] = [r for r in report["records"] if r.get("identity") != identity] + [record]
+                save()
+                emit({"status": "saved_review_progress", "processed": len(report["records"]),
+                      "screenshots_completed": sum(bool(r.get("screenshots")) for r in report["records"]),
+                      "message": "作品截图补核进度；联系人可达性仍未验证"})
+                if reviewed.get("evidence_status") == "rate_limited" or not reviewed.get("profile_verified"):
+                    # Stop this shop instead of repeated login, quota reveal, or retries.
+                    break
+                selected.remove(candidate)
+                page.wait_for_timeout(3200)
+            if not selected:
+                break
+    report["status"] = "finished" if not selected else "needs_review_or_login"
+    report["remaining_count"] = len(selected)
+    save()
+    emit({"status": "saved_review_finished", "remaining_count": len(selected),
+          "message": "补核报告已保存；平台一致性与实际可达性分开记录"})
+
+
+def fresh_contact_probe_input(candidate, shop):
+    # A saved channel must not suppress a fresh UI reveal or serve as its result.
+    keys = ("identity", "nickname", "buyin_uid", "buyin_profile_url", "精选联盟主页", "content_evidence_reviewed")
+    return {**{key: candidate[key] for key in keys if key in candidate}, "contact_shop": shop}
+
+
+def verify_saved_contacts(args, payload):
+    from contact_icons_single import run_candidate, contact_items, parse_contact_items
+    from contact_shop_cooldown import shop_cooldown_until
+    import time
+    output = Path(args.out_dir).resolve()
+    report_path = output / "aipr_saved_evidence_review.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    candidates = {creator_identity(row): row for row in payload.get("candidates", [])}
+    records = [row for row in report.get("records", []) if row.get("identity") in candidates][:20]
+    pending = [row for row in records if not row.get("contact_verification", {}).get("fresh_probe_completed")]
+    report["contact_review_status"] = "running"
+    def save():
+        report["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        report["contact_review_remaining"] = len(pending)
+        atomic_write_json(report_path, report)
+    save()
+    emit({"status": "saved_contact_review_started", "candidate_count": len(pending), "message": "复核原20条平台明文联系方式；不发送、不调用模型"})
+    endpoints = {"A": args.shop_a, "B": args.shop_b}
+    with sync_playwright() as playwright:
+        for shop in evidence_active_shops(payload):
+            if not pending:
+                break
+            if shop_cooldown_until(output, shop) > time.time():
+                emit({"status": "saved_contact_review_cooling", "shop": shop, "message": "店铺冷却中，保留待核验记录"})
+                continue
+            try:
+                browser, context, page = connect_shop(playwright.chromium, endpoints[shop], timeout=15000)
+                page.set_viewport_size({"width": 1280, "height": 900})
+            except Exception:
+                continue
+            for record in list(pending):
+                candidate = candidates[record["identity"]]
+                try:
+                    observed = run_candidate(page, fresh_contact_probe_input(candidate, shop), 3200,
+                                             output_dir=output, reveal_interval_ms=12000)
+                    status = observed.get("ui_contact_probe_status", "unknown")
+                    visible = parse_contact_items(contact_items(page))
+                    verification = compare_visible_contacts(candidate, visible)
+                    verification.update({"checked_at": datetime.now().isoformat(timespec="seconds"),
+                                         "probe_status": status, "shop": shop,
+                                         "fresh_probe_completed": status not in ("rate_limited", "daily_quota_exhausted", "login_required", "profile_not_ready"),
+                                         "source": "fresh_platform_ui", "observed_channels": {k: visible.get(k, "") for k in ("wechat", "phone", "email")}})
+                    shots = []
+                    if observed.get("ui_contact_icon_clicked") and any(visible.get(k) for k in ("wechat", "phone", "email")):
+                        folder = output / "evidence" / "contact-verification" / safe_name(record["identity"])
+                        folder.mkdir(parents=True, exist_ok=True)
+                        shot = folder / (datetime.now().strftime("%Y%m%d-%H%M%S") + ".jpg")
+                        page.screenshot(path=str(shot), type="jpeg", quality=68, full_page=False)
+                        shots.append(str(shot))
+                    verification["screenshots"] = shots
+                    record["contact_verification"] = verification
+                except Exception as exc:
+                    record["contact_verification"] = {**compare_visible_contacts(candidate, {}),
+                        "probe_status": "cooldown" if str(exc).startswith("contact_cooldown") else "probe_error",
+                        "fresh_probe_completed": False, "checked_at": datetime.now().isoformat(timespec="seconds")}
+                    save()
+                    break
+                if verification["fresh_probe_completed"]:
+                    pending.remove(record)
+                save()
+                emit({"status": "saved_contact_review_progress", "remaining_count": len(pending),
+                      "message": "平台明文核验结果已保存；实际可达性仍未验证"})
+                if not verification["fresh_probe_completed"]:
+                    break
+                page.wait_for_timeout(3200)
+    report["contact_review_status"] = "finished" if not pending else "platform_wait_or_login"
+    save()
+    emit({"status": "saved_contact_review_finished", "remaining_count": len(pending), "message": "联系方式复核已保存；不代表实际联系成功"})
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
@@ -627,10 +799,18 @@ def main() -> None:
     parser.add_argument("--lanes-per-shop", type=int, default=4)
     parser.add_argument("--keywords-json", default="[]")
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--verify-saved-contacts", action="store_true")
+    parser.add_argument("--review-saved", action="store_true")
     args = parser.parse_args()
 
     source = Path(args.input).resolve()
     payload = json.loads(source.read_text(encoding="utf-8"))
+    if args.verify_saved_contacts:
+        verify_saved_contacts(args, payload)
+        return
+    if args.review_saved:
+        review_saved_screenshots(args, payload)
+        return
     source_ready, source_reason = evidence_source_pool_ready(payload)
     if not source_ready:
         emit({

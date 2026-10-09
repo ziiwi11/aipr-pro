@@ -301,6 +301,19 @@ class EvidenceHighWaterTest(unittest.TestCase):
         self.assertFalse(result["content_evidence_reviewed"])
         self.assertTrue(result["evidence_gate"]["contact_visibility_verified"])
 
+    def test_structured_metadata_preserves_current_reviewed_content(self):
+        candidate = {
+            "identity": "reviewed-beauty", "gender": 2, "category": "美妆",
+            "contact_visible": True, "content_evidence_reviewed": True,
+            "evidence_status": "verified", "evidence_contract_version": 4,
+            "content_evidence_source": "buyin_profile",
+            "content_evidence": ["日常护肤好物分享，唇部护理使用测评"],
+            "evidence_gate": {"source": "buyin_profile", "evidence_count": 1},
+        }
+        result = apply_structured_beauty_evidence(candidate, ["唇部护理"])
+        self.assertEqual(result, candidate)
+        self.assertEqual(pending_evidence_candidates([result]), [])
+
     def test_structured_beauty_candidate_rejects_wrong_gender(self):
         candidate = {
             "identity": "male-beauty",

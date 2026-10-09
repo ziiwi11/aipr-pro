@@ -17,6 +17,14 @@ from scrape_buyin_public_intro_contacts_cdp import select_targets as select_intr
 
 
 class ContactLaneAssignmentTest(unittest.TestCase):
+    def test_preflight_prefers_each_shops_successful_profile(self):
+        rows = [
+            {"shop": "A", "precontact_qualified": True, "ui_contact_probe_status": "revealed", "buyin_profile_url": "https://buyin.example/a"},
+            {"shop": "B", "precontact_qualified": True, "ui_contact_probe_status": "revealed", "buyin_profile_url": "https://buyin.example/b"},
+        ]
+        self.assertEqual(contact_preflight_profile_url(rows, shop="A"), "https://buyin.example/a")
+        self.assertEqual(contact_preflight_profile_url(rows, shop="B"), "https://buyin.example/b")
+
     def test_preflight_skips_creator_that_previously_hit_rate_limit(self) -> None:
         rows = [
             {

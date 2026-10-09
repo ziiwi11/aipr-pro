@@ -43,12 +43,21 @@ function resolveWorkerCwd(outputDir, fallbackDir) {
   return target;
 }
 
-function buildPlatformReadiness({ platform, arch, pythonExe, browserExe, documentsDir, writable }) {
+function buildEmbeddedUserAgent({ platform, chromeVersion }) {
+  const system = platform === "win32" ? "Windows NT 10.0; Win64; x64"
+    : platform === "darwin" ? "Macintosh; Intel Mac OS X 10_15_7"
+    : "X11; Linux x86_64";
+  const version = String(chromeVersion || "150.0.0.0");
+  if (!/^\d+(?:\.\d+){0,3}$/.test(version)) throw new Error("Invalid browser version");
+  return `Mozilla/5.0 (${system}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Safari/537.36`;
+}
+
+function buildPlatformReadiness({ platform, arch, pythonExe, browserExe, embeddedBrowserAvailable = false, documentsDir, writable }) {
   const supported = (platform === "darwin" && arch === "arm64") || (platform === "win32" && arch === "x64");
   const checks = [
     { key: "architecture", label: "系统架构", passed: supported, detail: `${platform}/${arch}` },
     { key: "python", label: "内置 Python", passed: Boolean(pythonExe), detail: pythonExe || "未找到" },
-    { key: "browser", label: "Chrome / Edge", passed: Boolean(browserExe), detail: browserExe || "未找到" },
+    { key: "browser", label: "采集浏览器", passed: embeddedBrowserAvailable || Boolean(browserExe), detail: embeddedBrowserAvailable ? "软件内置浏览器已初始化" : browserExe || "内置浏览器尚未初始化，外部浏览器也未找到" },
     { key: "documents", label: "品牌任务目录", passed: Boolean(documentsDir) && Boolean(writable), detail: documentsDir || "不可用" },
   ];
   return {
@@ -64,6 +73,7 @@ function buildPlatformReadiness({ platform, arch, pythonExe, browserExe, documen
 }
 
 module.exports = {
+  buildEmbeddedUserAgent,
   buildBrowserLaunch,
   buildPlatformReadiness,
   resolveBrowserExecutable,

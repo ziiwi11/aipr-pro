@@ -1,94 +1,61 @@
-# AIPR Pro 达人运营系统
+# 千寻达人运营系统
 
-macOS Apple Silicon / Windows x64 双平台桌面项目，包含 Electron 主进程、Python 采集与审核后端、前端发布资源、测试和构建脚本。
+面向抖店精选联盟的桌面软件。支持手卡理解、类目采集、作品与模型复核、达人资料保存、联系人核对及批次交付。日常使用从软件界面完成，不需要 Codex。
 
-## 平台支持
+## 交付状态
 
-| 平台 | 架构 | 状态 |
-|---|---|---|
-| macOS | arm64 (M 系列) | ✅ 已构建验证 |
-| Windows | x64 | ✅ 配置就绪（见 [WINDOWS-BUILD.md](WINDOWS-BUILD.md)）|
-| macOS | x64 (Intel) | ❌ 不支持 |
-| Windows | arm64 | ❌ 不支持 |
+2026-10-09：当前仍在正式交付验收，尚未冻结发布版本。当前同版候选为1.0.78。Mac 本机已有原生采集、20人批次交付、完整备份独立恢复、保存配置强制退出重开和任务切换隔离证据；双平台候选包内容及完整性已核对。个护家清实际采集合格样本与跨电脑实机仍待验。自动回归通过不代表另一台电脑或平台在线功能已通过。
 
-平台判定逻辑见 `app/electron/platform-runtime.cjs`：
+| 环境 | 状态 |
+|---|---|
+| macOS Apple Silicon | 本机原生验收进行中，最终包待冻结 |
+| Windows 10/11 x64 | 1.0.78同版安装/便携包与内置运行环境检查通过，实机验收待完成 |
+| 另一台 Mac | 实机验收待完成 |
+| macOS Intel / Windows ARM | 当前不支持 |
+| 正式发布者签名、公证 | 尚未配置证书；临时签名不等于正式公证 |
 
-```javascript
-const supported = (platform === "darwin" && arch === "arm64")
-               || (platform === "win32" && arch === "x64");
-```
+## 客户使用流程
 
-## 项目完整性
+1. 导入品牌手卡，核对 AI 提议，选择条件或自行修改，再保存。
+2. 在自动采集选择精选联盟类目及达人类型、目标和其他条件。真人出镜属于作品审核条件；软件不能将缺乏证据视为通过。
+3. 在抖店浏览器登录有权限的店铺，启动采集。遇平台冷却或验证时按软件提示等待或本人操作。
+4. 联系与交付核对本次新增批次，达人优选查看往期及详细资料。历史恢复和联系人修订不算新采集。
+5. 从当前批次交付，核对 JSON、Excel、两个队列及交接清单。采集、预览和导出不会自动授权或发送。
 
-此版本整理自 M1 迁移工程。`app/dist` 是现有前端编译产物及增量界面脚本；原始 React/Vue/TypeScript 前端工程不在当前材料中。因此可以打包现有界面，但不能从原始前端源码重新生成该 bundle。Python 运行环境在每台机器上安装，安装包不包含完整 Python 解释器。
+Jev 和阿里云百炼千问是独立服务，使用各自配置；千问真实调用尚待可用连接验收。费用以服务商账单为准，不用 Token 数替代实际金额。联系人明文与证据完整不等于实际可达，模型结果仍需抽查。
 
-## 安装与构建
+## 数据保存与迁移
 
-**macOS**：需要 Apple Silicon Mac、arm64 Node.js 20+、npm、arm64 Python 3.12，以及安装于 Applications 的 Google Chrome 或 Chromium。
+兼容既有数据目录名，不因软件改名迁移或删除历史数据：
 
-**Windows**：需要 Windows 10/11 x64、Node.js 20+、Python 3.12（准备运行时用）、系统 Chrome 或 Edge。详见 [WINDOWS-BUILD.md](WINDOWS-BUILD.md)。
+- Mac 配置：`~/Library/Application Support/AIPR Pro 达人运营系统/`
+- Windows 配置：`%APPDATA%\AIPR Pro 达人运营系统\`
+- 品牌任务：系统 Documents 下的 `AIPR Pro/品牌任务/`
 
-构建会联网下载 npm 和 Python 依赖。
+在系统设置使用“备份任务与名单”与“校验并恢复备份”。恢复先校验清单和文件哈希，再写入独立目录，保留原数据并迁移资料引用；恢复任务不会自动采集。备份包含任务、名单、作品及联系人证据、复核与交付记录；不含浏览器登录会话、API Key 和发送授权。备份目录不要放进被备份的任务目录。恢复副本不重复计入达人总数。
 
-```bash
-uname -m
-node --version
-python3.12 --version
-bash ./01-构建并安装-M1.command
-```
+仓库和安装包不附带真实达人资料、联系人、登录态或密钥。旧 `restore_data.py` 仅为历史迁移工具；客户迁移以软件内备份恢复为准。
 
-脚本建立应用专用 Python 环境、运行 `npm ci`、打包并本机签名。完成后打开 DMG，将应用拖入 Applications。构建产物位于：
+## 开发与构建
 
-```text
-app/release-macos/AIPR-Pro-Mac-M1-1.0.0-arm64.dmg
-app/release-macos/AIPR-Pro-Mac-M1-1.0.0-arm64.zip
-```
+构建机需要 Node/npm 及用于测试和准备运行环境的 Python。客户安装包内置平台运行环境，客户不需安装 Node、Python 或 pip。首次打包前准备对应运行环境。
 
-这是本机临时签名包，未配置 Developer ID 公证。另一台 Mac 也需安装 Python 运行环境。构建不会自动恢复历史任务；如需迁移，按下面的数据迁移步骤操作。
-
-## 使用流程
-
-1. 启动应用，检查架构、Python、浏览器和 Documents 可写状态。
-2. 在应用内置 A/B 店浏览器分别手动登录，并确认可进入达人广场。
-3. 创建品牌任务，配置产品、视频达人类型、类目、画像、销售额和目标数量。
-4. 使用结构化筛选分页发现达人。实时流程逐个审核，合适后查看平台授权联系方式，通过去重才进入名单。
-5. 在正式名单、联系方式和运行记录中查看结果并导出。候选数、“有联系方式”标记、已揭示明文数和最终名单数是不同指标。
-6. 平台出现请求频繁、验证码或登录失效时停止，保留断点，待恢复后续跑。
-
-平台页面会变化，筛选点击日志不等于实际筛选结果；首次部署应以少量达人核对类目、内容类型、画像、联系方式和导出。现有自动审核仍需人工抽查真实视频及场景适配。
-
-## AI 建联（雷神）
-
-本项目包含雷神客户端适配器，不包含雷神服务。默认在本机 `127.0.0.1:19628`、`127.0.0.1:19627` 查找就绪的 `brand-referral` 项目。先启动兼容的雷神服务，再在 AI 建联界面选择名单、批量确认授权；同步与启动由界面确认控制。采集名单本身不会授权发送消息。
-
-## 数据位置与迁移
-
-- 应用配置和会话：`~/Library/Application Support/AIPR Pro 达人运营系统/`
-- 品牌任务与交付：`~/Documents/AIPR Pro/品牌任务/`
-- 仓库不附带真实达人名单、任务、联系方式、登录会话或密钥。
-
-如需导入自己保存的历史任务，将数据放入本地 `migration-data/tasks/`（可选 `migration-data/integrations/`），关闭应用后执行 `python3.12 restore_data.py`。脚本先备份现有 tasks/integrations，再恢复文件，并将 Windows 用户 Documents 路径转换为当前 Mac Documents。仅放入可信任务配置；不要把浏览器目录或凭据加入迁移目录。
-
-## 开发与验证
-
-```bash
+```sh
 cd app
 npm ci
-node --test electron/*.test.cjs
-python3.12 -m venv .venv
-.venv/bin/python -m pip install -r requirements-macos.txt
-.venv/bin/python -m unittest discover -s backend -p 'test_*.py'
-npm run mac:dir
+npm --prefix frontend ci
+npm run verify
+npm run mac:package
+# Windows x64（优先在 Windows 构建机）
+npm run win:build
 ```
 
-后端可通过命令行运行，但日常操作建议从应用启动，以便任务状态、历史记录和进程管理同步。测试通过不代表平台在线功能已验证；在线采集依赖当前账号权限和平台页面。
+`app/frontend` 为可重建的 TypeScript 前端源码，`app/dist` 为发布资源。后端位于 `app/backend`，桌面逻辑位于 `app/electron`。平台运行环境位于 `app/runtime`，最终安装包不混入另一平台运行时。
 
-## 目录
+Mac 打包默认生成本机临时签名；正式签名与公证需要发布方提供的有效身份。构建及完整回归不能代替实际安装、登录、采集、交付和恢复测试。
 
-- `app/electron/`：窗口、内置浏览器、任务、交付与雷神集成。
-- `app/backend/`：发现、证据审核、联系方式、去重、导出及测试。
-- `app/dist/`：已有前端发布资源。
-- `app/runtime/`：调用本机专用 Python 环境的包装脚本。
-- `restore_data.py`：可选历史任务迁移工具。
+## 发布与验收
 
-未指定开源许可证；本次整理不改变原项目及第三方组件的权利归属。
+后续版本通过 GitHub Releases 发布。指定仓库为 `ziiwi11/aipr-pro`；当前连接账号尚无该仓库访问权限，不能宣称已上传。发布前按 [正式发布门槛](docs/RELEASE-ACCEPTANCE.md) 冻结同一版本、核对清洁安装包和 SHA256，并完成平台实测。
+
+Windows 实机步骤见 [Windows 验收](docs/WINDOWS-VERIFICATION.md)，构建说明见 [WINDOWS-BUILD.md](WINDOWS-BUILD.md)。历史交接文档为旧版本记录，不能作为本次通过证据。

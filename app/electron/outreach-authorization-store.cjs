@@ -21,11 +21,12 @@ class OutreachAuthorizationStore {
         missing.push({ id: creator.id, name: creator.name || "" });
         continue;
       }
-      if (seenContacts.has(contact.normalized)) {
+      const contactValues = creatorContactValues(creator);
+      if (contactValues.some(value => seenContacts.has(value))) {
         duplicate.push({ id: creator.id, name: creator.name || "", contactType: contact.type });
         continue;
       }
-      seenContacts.add(contact.normalized);
+      for (const value of contactValues) seenContacts.add(value);
       valid.push({
         id: String(creator.id),
         name: String(creator.name || ""),
@@ -117,9 +118,25 @@ function creatorContact(creator = {}) {
   ];
   for (const [type, raw] of candidates) {
     const value = String(raw || "").trim();
-    if (value) return { type, value, normalized: value.toLowerCase().replace(/[\s-]+/g, "") };
+    if (value && !/[*•]|隐藏|未授权|待补|暂无|不可见/u.test(value)) return { type, value, normalized: normalizeContact(type, value) };
   }
   return { type: "", value: "", normalized: "" };
+}
+
+function normalizeContact(type, value) {
+  const text = String(value || "").trim().toLowerCase().replace(/\s+/g, "");
+  const phoneText = type === "phone" ? text.replace(/-/g, "") : text;
+  const phone = phoneText.match(/^(?:\+?86)?(1[3-9]\d{9})$/);
+  if (phone) return phone[1];
+  return type === "phone" ? text.replace(/-/g, "") : text;
+}
+
+function creatorContactValues(creator) {
+  return ["wechat", "phone", "plainContact"].flatMap(key => {
+    const value = String(creator[key] || "").trim();
+    return value && !/[*•]|隐藏|未授权|待补|暂无|不可见/u.test(value)
+      ? [normalizeContact(key === "plainContact" ? "contact" : key, value)] : [];
+  });
 }
 
 function publicRecord(record) {

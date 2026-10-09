@@ -35,8 +35,9 @@ def buyin_page_ready(page: Page, timeout: int = 1200) -> bool:
             placeholder = compact(inputs.nth(index).get_attribute("placeholder"))
             if "达人" in placeholder:
                 return True
-        body = page.locator("body").inner_text(timeout=timeout)
-        return "达人广场" in body and "找达人" in body
+        # Navigation labels remain visible when the square itself fails to load.
+        # Only an actual visible creator search input proves the list is ready.
+        return False
     except Exception:
         return False
 
@@ -79,6 +80,39 @@ def wait_for_page_ready(page: Page, timeout_ms: int = 30000) -> bool:
     return False
 
 
+def bootstrap_embedded_alliance(page: Page) -> None:
+    """Establish alliance SSO in the supplied shop partition only."""
+    page.goto(FXG_HOME_URL, wait_until="domcontentloaded", timeout=45000)
+    entry = page.locator("a[href*='/ffa/buyin/shop_small']").first
+    try:
+        entry.wait_for(state="visible", timeout=15000)
+        entry.click(timeout=6000)
+    except Exception:
+        alliance = first_visible_exact_text(page, "精选联盟")
+        if not alliance:
+            raise RuntimeError("fxg_merchant_not_logged_in_or_alliance_entry_missing")
+        alliance.hover(timeout=5000)
+        page.wait_for_timeout(800)
+        cooperation = first_visible_exact_text(page, "找合作")
+        if not cooperation:
+            raise RuntimeError("fxg_merchant_not_logged_in_or_alliance_entry_missing")
+        cooperation.click(timeout=6000)
+    # Electron routes official popup links back into this same embedded view.
+    page.wait_for_timeout(2500)
+    if buyin_page_ready(page):
+        return
+    for label in ("找合作", "找达人", "达人广场"):
+        node = first_visible_exact_text(page, label)
+        if node:
+            node.click(timeout=6000)
+            page.wait_for_timeout(1500)
+            if buyin_page_ready(page):
+                return
+    page.goto(BUYIN_SQUARE_URL, wait_until="domcontentloaded", timeout=45000)
+    if not wait_for_page_ready(page, timeout_ms=30000):
+        raise RuntimeError("buyin_session_bootstrap_failed_after_merchant_entry")
+
+
 def bootstrap_buyin_page(
     context: BrowserContext,
     similar_mode: bool = False,
@@ -94,7 +128,7 @@ def bootstrap_buyin_page(
         if not buyin_page_ready(page):
             page.goto(BUYIN_SQUARE_URL, wait_until="domcontentloaded", timeout=45000)
             if not wait_for_page_ready(page, timeout_ms=30000):
-                raise RuntimeError("buyin_session_bootstrap_failed")
+                bootstrap_embedded_alliance(page)
     else:
         page = find_ready_buyin_page(context)
     if preferred_page is None and not page:

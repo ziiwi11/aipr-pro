@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
 import queue
 import random
 import subprocess
@@ -19,6 +21,13 @@ from pipeline_acceptance import source_pool_target, validate_candidate_count
 
 
 configure_utf8_stdout()
+
+
+def require_keyword_replenishment(strategy: dict) -> None:
+    if strategy.get("sourceDiscoveryMode") in {"structured_browse", "browse", "filter_browse"}:
+        emit({"status": "pipeline_error", "stage": "collection",
+              "message": "类目来源本轮已耗尽，保留名单和分页断点；按已保存类目模式停止，不切换关键词搜索"})
+        raise SystemExit(7)
 
 
 REPLENISHMENT_KEYWORDS = (
@@ -101,7 +110,12 @@ def extend_low_pool_keywords(
     strategy: dict | None = None,
 ) -> list[str]:
     if beauty_strategy(strategy):
-        return list(dict.fromkeys([*keywords, *BEAUTY_LOW_POOL_KEYWORDS]))
+        extra = list(BEAUTY_LOW_POOL_KEYWORDS)
+        if int(round_index or 1) >= 2:
+            extra.extend(("日常好物", "生活好物", "好物分享", "通勤妆容", "素颜护肤", "平价美妆"))
+        if int(round_index or 1) >= 3:
+            extra.extend(("护肤日常", "化妆教程", "妆前护理", "空瓶分享", "爱用好物", "个人护理"))
+        return list(dict.fromkeys([*keywords, *extra]))
     extra: list[str] = list(LOW_POOL_KEYWORDS)
     completed_groups = max(0, min(len(LOW_POOL_ROUND_KEYWORDS), int(round_index or 1) - 1))
     for group in LOW_POOL_ROUND_KEYWORDS[:completed_groups]:
@@ -141,6 +155,17 @@ def merge_candidate_sources(base_payload: dict, extra_payloads: list[dict], excl
         "candidate_count": len(pool),
         "candidates": list(pool.values()),
     }
+
+
+def has_new_discovery_candidates(payload: dict, saved_payload: dict) -> bool:
+    known = set()
+    for row in saved_payload.get("candidates") or []:
+        if isinstance(row, dict):
+            known.update(candidate_identity_values(row))
+    return any(
+        candidate_identity_values(row) and not candidate_identity_values(row) & known
+        for row in payload.get("candidates") or [] if isinstance(row, dict)
+    )
 
 
 def load_verified_candidate_seed(output_dir: Path, excluded: set[str]) -> dict | None:
@@ -361,6 +386,30 @@ def recover_completed_collection(highwater_path: Path, strategy: dict) -> dict |
     }
 
 
+def stop_stream_process(process: subprocess.Popen) -> None:
+    """Stop the isolated worker and its browser driver without touching the app."""
+    def send(sig: int) -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, sig)
+            elif sig == signal.SIGTERM:
+                process.terminate()
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass
+
+    send(signal.SIGTERM)
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        send(signal.SIGKILL)
+        process.wait(timeout=5)
+    # A descendant can still hold stdout/stderr after its parent exits.
+    if os.name == "posix":
+        send(signal.SIGKILL)
+
+
 def run_stream(
     command: list[str],
     idle_timeout_seconds: float = 0,
@@ -375,6 +424,7 @@ def run_stream(
         text=True,
         encoding="utf-8",
         errors="replace",
+        start_new_session=os.name == "posix",
     )
     assert process.stdout is not None
     output_queue: queue.Queue[str | None] = queue.Queue()
@@ -399,23 +449,21 @@ def run_stream(
             line = output_queue.get(timeout=idle_timeout_seconds if idle_timeout_seconds > 0 else None)
         except queue.Empty:
             recovered = recover_on_idle() if recover_on_idle else None
-            if not recovered:
-                continue
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-            emit(recovered)
-            events.append(recovered)
+            stop_stream_process(process)
+            event = recovered or {
+                "status": "worker_idle_timeout",
+                "idle_timeout_seconds": idle_timeout_seconds,
+                "message": "采集子作业长时间没有新结果，已结束卡住的连接并保留断点",
+            }
+            emit(event)
+            events.append(event)
             stdout_thread.join(timeout=1)
             stderr_thread.join(timeout=1)
             if process.stdout is not None:
                 process.stdout.close()
             if process.stderr is not None:
                 process.stderr.close()
-            return 0, events
+            return (0 if recovered else 124), events
         if line is None:
             break
         clean = line.strip()
@@ -431,12 +479,7 @@ def run_stream(
                 pause_streak += 1
                 if pause_streak < 3:
                     continue
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+                stop_stream_process(process)
                 stdout_thread.join(timeout=1)
                 stderr_thread.join(timeout=1)
                 if process.stdout is not None:
@@ -454,10 +497,36 @@ def run_stream(
     code = process.wait()
     stdout_thread.join(timeout=1)
     stderr_thread.join(timeout=1)
+    if process.stdout is not None:
+        process.stdout.close()
+    if process.stderr is not None:
+        process.stderr.close()
     stderr = "".join(stderr_chunks)
     if stderr.strip():
         emit({"status": "worker_stderr", "message": stderr.strip()[-1200:]})
     return code, events
+
+
+def collection_ended_without_platform_pause(events: list[dict]) -> bool:
+    """Use the final attempt, rather than an earlier recovered cooldown."""
+    for event in reversed(events):
+        if event.get("status") == "collection_incomplete":
+            return True
+        if platform_pause_event(event):
+            return False
+    return not any(platform_pause_event(event) for event in events)
+
+
+def usable_partial_collection(checkpoint: dict, count: int) -> dict | None:
+    """Keep a nonempty saved source available to bounded replenishment.
+
+    Candidate targets are checked later; a short discovery pool is not a
+    missing output and must reach the similar-source/keyword expansion stages.
+    This never changes the final contact or evidence admission requirements.
+    """
+    if count <= 0 or not checkpoint.get("output"):
+        return None
+    return {**checkpoint, "status": "collection_finished", "candidate_count": count}
 
 
 def run_collection_with_retry(
@@ -476,15 +545,61 @@ def run_collection_with_retry(
     返回 (最终退出码, 所有轮次的事件列表)。
     """
     sleep = sleeper or time.sleep
+    cooldown_path = None
+    if "--out-dir" in command:
+        cooldown_path = Path(command[command.index("--out-dir") + 1]) / "collection-platform-cooldown.json"
+    if cooldown_path and cooldown_path.exists():
+        try:
+            remaining = float(json.loads(cooldown_path.read_text()).get("retry_after", 0)) - time.time()
+        except (OSError, ValueError, TypeError):
+            remaining = 0
+        if remaining > 0:
+            emit({"status": "collection_retry_scheduled", "backoff_ms": int(remaining * 1000),
+                  "message": f"保留上次平台冷却，{remaining:.0f} 秒后从断点恢复"})
+            sleep(remaining)
     all_events: list[dict] = []
     last_code = 0
 
-    for attempt in range(1, max_retries + 1):
-        code, events = run_stream(command, idle_timeout_seconds=90)
+    attempt = 1
+    batch_count = 0
+    while attempt <= max_retries:
+        code, events = run_stream(command, idle_timeout_seconds=600)
         all_events.extend(events)
+        if any(event.get("status") == "jev_action_required" for event in events):
+            # This is an account block, never a short source pool to recover.
+            return 11, all_events
+        # A shop-level frequency pause can finish with an incomplete pool (7).
+        # Preserve the platform cooldown even when the worker did not emit code 9.
+        quota_waits = [e for e in events
+                       if e.get("status") == "pipeline_waiting_for_contact_quota"]
+        if quota_waits or (code == 7 and any(platform_pause_event(event) for event in events)):
+            code = 9
         last_code = code
 
-        if code != 9:
+        if code == 0 and any(e.get("status") == "collection_batch_paused" for e in events):
+            # A completed page batch proves recovery; retry limits count
+            # consecutive failures, not failures across successful batches.
+            attempt = 1
+            batch_count += 1
+            if batch_count >= 64:
+                emit({"status": "collection_retry_exhausted", "message": "分页断点连续运行已达上限"})
+                return 7, all_events
+            emit({"status": "collection_batch_resuming", "batch": batch_count,
+                  "message": "分页批次已保存，自动继续下一批"})
+            sleep(max(1, base_backoff_ms / 1000))
+            continue
+        transient = code != 0 and any(
+            e.get("status") == "shop_error" and any(marker in str(e.get("message", "")) for marker in (
+                "net::ERR_CONNECTION_CLOSED", "net::ERR_CONNECTION_RESET", "net::ERR_TIMED_OUT",
+                "Timeout", "Connection refused", "ECONNRESET",
+                "buyin_structured_browse_request_not_found",
+                "realtime_page_crashed",
+            )) for e in events
+        )
+        transient = transient or (code == 124 and any(
+            event.get("status") == "worker_idle_timeout" for event in events
+        ))
+        if code != 9 and not transient:
             return code, all_events
 
         # 9 = pipeline_platform_paused（平台限流）
@@ -493,26 +608,37 @@ def run_collection_with_retry(
             {},
         )
         if attempt >= max_retries:
+            if code == 9 and cooldown_path:
+                cooldown_path.write_text(json.dumps({
+                    "retry_after": time.time() + rate_limit_backoff_ms / 1000 * (2 ** (attempt - 1)),
+                    "reason": "consecutive_platform_limits",
+                }), encoding="utf-8")
             emit({
                 "status": "collection_retry_exhausted",
                 "attempts": attempt,
-                "message": "采集多次遇平台限流，已停止重试",
+                "message": "采集多次失败，已保存断点并停止重试",
             })
             return code, all_events
 
-        backoff_ms = rate_limit_backoff_ms * (2 ** (attempt - 1))
+        backoff_ms = (rate_limit_backoff_ms if code == 9 else max(30000, base_backoff_ms)) * (2 ** (attempt - 1))
         jitter_ms = random.randint(0, 5000)
         wait_ms = backoff_ms + jitter_ms
+        # A quota checkpoint is not a completed page batch. Preserve the
+        # shop's saved deadline rather than reopening its page every second.
+        quota_deadline = max((float(e.get("retry_after") or 0) for e in quota_waits), default=0)
+        wait_ms = max(wait_ms, int(max(0, quota_deadline - time.time()) * 1000))
         emit({
             "status": "collection_retry_scheduled",
             "attempt": attempt,
             "next_attempt": attempt + 1,
             "backoff_ms": backoff_ms,
+            "wait_ms": wait_ms,
             "jitter_ms": jitter_ms,
             "source_status": limited_event.get("source_status", ""),
-            "message": f"平台限流，{wait_ms / 1000:.0f} 秒后重试",
+            "message": f"{'平台限流' if code == 9 else '页面连接中断'}，{wait_ms / 1000:.0f} 秒后从断点重试",
         })
         sleep(wait_ms / 1000)
+        attempt += 1
 
     return last_code, all_events
 
@@ -541,6 +667,16 @@ def main() -> None:
     strategy_path = Path(args.strategy).resolve()
     output_dir = Path(args.out_dir).resolve()
     strategy = json.loads(strategy_path.read_text(encoding="utf-8"))
+    # Discovery exclusions grow during replenishment; delivery exclusions must
+    # remain the original cross-task identities, even after a restart.
+    strategy.setdefault("deliveryExcludeIdentities", list(strategy.get("excludeIdentities") or []))
+    delivery_scope_path = output_dir / "delivery-exclusion-scope.json"
+    if delivery_scope_path.exists():
+        scope = json.loads(delivery_scope_path.read_text(encoding="utf-8"))
+        strategy["deliveryExcludeIdentities"] = list(scope["excludeIdentities"])
+    else:
+        delivery_scope_path.write_text(json.dumps({"excludeIdentities": strategy["deliveryExcludeIdentities"]},
+                                                  ensure_ascii=False, indent=2), encoding="utf-8")
     if requires_underwear_product_evidence(strategy):
         strategy.setdefault("minimumUnderwearProductSales", int(strategy.get("minimumMonthlySales") or 10000))
         strategy.setdefault("minimumLevel", min([int(item) for item in strategy.get("creatorLevels") or [2]]))
@@ -548,6 +684,28 @@ def main() -> None:
         strategy.setdefault("requireBodyMeasurements", False)
         strategy.setdefault("requireShapewearContent", False)
         strategy.setdefault("requirePlainContact", True)
+    # A resumed realtime task already has contact and content evidence. Let the
+    # strict finalizer revalidate it before opening another collection session.
+    strict_path = output_dir / "aipr_strict_contact_highwater.json"
+    if strategy.get("realtimeCreatorFlow") is True and strict_path.exists():
+        strict = json.loads(strict_path.read_text(encoding="utf-8"))
+        if (strict.get("status") == "complete"
+                and int(strict.get("strict_selected_count") or 0) >= int(strategy.get("targetCount") or 1)):
+            command = [sys.executable, str(finalizer), "--input", str(strict_path),
+                       "--strategy", str(strategy_path), "--out-dir", str(output_dir),
+                       "--task-id", args.task_id, "--task-name", args.task_name,
+                       "--require-strict-highwater"]
+            if args.original_workbook:
+                command.extend(["--original-workbook", args.original_workbook])
+            if args.robot_queue:
+                command.extend(["--robot-queue", args.robot_queue])
+            code, events = run_stream(command)
+            delivery = next((e for e in reversed(events) if e.get("status") == "delivery_ready"), None)
+            if delivery and code == 0:
+                emit({"status": "pipeline_finished", "contact_stage": "finished",
+                      "delivery": delivery.get("output"), "code": 0})
+                return
+            raise SystemExit(code or 5)
     contact_highwater = output_dir / "aipr_contact_highwater.json"
     if contact_highwater.exists():
         try:
@@ -558,6 +716,12 @@ def main() -> None:
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             pass
     max_rounds = resolve_max_replenishment_rounds(strategy)
+    if strategy.get("realtimeCreatorFlow") is True and (output_dir / "aipr_realtime_creator_flow.json").exists():
+        from realtime_creator_processor import RealtimeCreatorProcessor
+        restored_strict = RealtimeCreatorProcessor(output_dir, strategy, audit_progress=emit)._strict_payload()
+        emit({"status": "realtime_delivery_restored",
+              "strict_selected_count": restored_strict["strict_selected_count"],
+              "message": "已重新核验本批保存名单"})
 
     active_shops = [
         str(shop).upper()
@@ -616,6 +780,67 @@ def main() -> None:
                 "--shop-b", args.shop_b,
             ])
             collection = next((event for event in reversed(events) if event.get("status") == "collection_finished"), None)
+            # A checkpoint below the overcollection target can still provide
+            # enough candidates for the full evidence/contact stages.
+            if collect_code == 7 and collection_ended_without_platform_pause(events):
+                checkpoint = next((event for event in reversed(events)
+                                   if event.get("status") == "collection_checkpoint_saved"), None)
+                if checkpoint and checkpoint.get("output"):
+                    try:
+                        pool = json.loads(Path(checkpoint["output"]).read_text(encoding="utf-8"))
+                        count = len([row for row in pool.get("candidates", []) if isinstance(row, dict)])
+                    except (OSError, ValueError, TypeError):
+                        pool = {"candidates": []}
+                        count = 0
+                    if count < int(strategy.get("targetCount") or 1):
+                        # A short discovery batch must not discard this task's
+                        # previously verified pool after a recoverable failure.
+                        saved_path = output_dir / "aipr_evidence_highwater.json"
+                        try:
+                            saved_pool = json.loads(saved_path.read_text(encoding="utf-8"))
+                            saved_count = len([row for row in saved_pool.get("candidates", []) if isinstance(row, dict)])
+                        except (OSError, ValueError, TypeError):
+                            saved_count = 0
+                        if saved_count >= int(strategy.get("targetCount") or 1):
+                            if not has_new_discovery_candidates(pool, saved_pool):
+                                if round_index >= max_rounds:
+                                    emit({"status": "pipeline_error", "stage": "collection",
+                                          "message": "补采来源已耗尽且没有新增达人，保留已保存名单"})
+                                    raise SystemExit(7)
+                                replenishment_round = max(round_index, int(strategy.get("replenishmentRound") or 0) + 1)
+                                require_keyword_replenishment(strategy)
+                                strategy["keywords"] = extend_low_pool_keywords(
+                                    [str(item).strip() for item in strategy.get("keywords") or [] if str(item).strip()],
+                                    round_index=replenishment_round, strategy=strategy,
+                                )
+                                # Completed browse pages cannot discover expanded keywords.
+                                if strategy.get("sourceDiscoveryMode") in {"structured_browse", "browse", "filter_browse"}:
+                                    strategy["sourceDiscoveryMode"] = "keyword_search"
+                                strategy["replenishmentRound"] = replenishment_round
+                                strategy_path.write_text(json.dumps(strategy, ensure_ascii=False, indent=2), encoding="utf-8")
+                                similar_attempted = False
+                                emit({"status": "source_pool_replenishing", "round": round_index,
+                                      "candidate_count": count, "target_count": strategy.get("targetCount"),
+                                      "message": "本轮无新增达人，扩展来源继续补采，不重复复核旧名单"})
+                                continue
+                            delivery_excluded = {str(item).strip() for item in strategy.get("deliveryExcludeIdentities") or [] if str(item).strip()}
+                            combined = merge_candidate_sources(saved_pool, [pool], delivery_excluded)
+                            combined["strategy"] = strategy
+                            recovered_path = output_dir / "aipr_partial_recovered_pool.json"
+                            recovered_path.write_text(json.dumps(combined, ensure_ascii=False, indent=2), encoding="utf-8")
+                            checkpoint = {**checkpoint, "output": str(recovered_path)}
+                            count = combined["candidate_count"]
+                    recovered = usable_partial_collection(checkpoint, count)
+                    if recovered:
+                        collect_code = 0
+                        collection = recovered
+                        emit({"status": "collection_partial_pool_recovered", "candidate_count": count,
+                              "message": "已保留候选池，继续来源补采及内容和联系方式核验"})
+        if collect_code == 11:
+            block = next(event for event in reversed(events) if event.get("status") == "jev_action_required")
+            emit({"status": "pipeline_error", "message": block.get("message"),
+                  "http_status": block.get("http_status")})
+            raise SystemExit(11)
         if collect_code or not collection or not collection.get("output"):
             emit({"status": "pipeline_error", "message": "达人采集未生成可用候选池"})
             raise SystemExit(collect_code or 2)
@@ -624,7 +849,8 @@ def main() -> None:
         if actual_count < target_count and not similar_attempted and contact_highwater.exists():
             similar_attempted = True
             similar_payloads: list[dict] = []
-            for shop, endpoint in (("A", args.shop_a), ("B", args.shop_b)):
+            for shop in active_shops:
+                endpoint = endpoints[shop]
                 _code, similar_events = run_stream([
                     sys.executable, str(similar_collector),
                     "--input", str(contact_highwater),
@@ -681,9 +907,12 @@ def main() -> None:
                 round_index,
                 int(strategy.get("replenishmentRound") or 0) + 1,
             )
+            require_keyword_replenishment(strategy)
             strategy["keywords"] = extend_low_pool_keywords([
                 str(item).strip() for item in strategy.get("keywords") or [] if str(item).strip()
             ], round_index=replenishment_round, strategy=strategy)
+            if strategy.get("sourceDiscoveryMode") in {"structured_browse", "browse", "filter_browse"}:
+                strategy["sourceDiscoveryMode"] = "keyword_search"
             strategy["replenishmentRound"] = replenishment_round
             strategy_path.write_text(json.dumps(strategy, ensure_ascii=False, indent=2), encoding="utf-8")
             emit({

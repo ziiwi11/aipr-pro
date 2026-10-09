@@ -102,3 +102,26 @@ class RealtimeCollectorIntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class PlatformStrategyMappingTests(unittest.TestCase):
+    def test_platform_labels_do_not_confuse_review_criteria_with_content_topic(self):
+        from collect_buyin_creators_cdp import strategy_filter_labels
+        labels = strategy_filter_labels({"category":"美妆个护","contentType":"图文达人","platformContentTopic":"时尚","creatorType":"测评种草","contentPresentation":"real_person","minimumMonthlySales":50000})
+        self.assertEqual(labels, ["美妆", "个护家清", "图文达人", "时尚"])
+    def test_minimum_sales_is_enforced_against_returned_lower_bound(self):
+        from collect_buyin_creators_cdp import candidate_matches_strategy
+        strategy={"category":"食品饮料","minimumMonthlySales":50000}
+        self.assertFalse(candidate_matches_strategy({"nickname":"test"},strategy))
+        self.assertFalse(candidate_matches_strategy({"monthly_sales_low":10000},strategy))
+        self.assertTrue(candidate_matches_strategy({"monthly_sales_low":50000},strategy))
+
+    def test_category_confirmation_requires_submitted_chip_not_open_menu(self):
+        from collect_buyin_creators_cdp import category_is_confirmed
+        self.assertFalse(category_is_confirmed("主推类目 美妆 不限 彩妆香水", "美妆"))
+        self.assertTrue(category_is_confirmed("已筛选\n主推类目： 美妆/不限", "美妆"))
+        self.assertFalse(category_is_confirmed("已筛选 主推类目：食品饮料/不限", "美妆"))
+
+    def test_category_specific_checkpoints_roundtrip(self):
+        from collect_buyin_creators_cdp import serialized_completed_pages, completed_pages_from_payload
+        checkpoints={"A:美妆":{1,2},"A:个护家清":{1},"B":{3}}
+        self.assertEqual(completed_pages_from_payload({"completed_pages_by_shop":serialized_completed_pages(checkpoints)}),checkpoints)
