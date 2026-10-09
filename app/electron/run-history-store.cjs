@@ -1,3 +1,5 @@
+const {summarizeRuntime}=require("./runtime-metrics.cjs");
+const {readCachedNdjson}=require("./cached-file.cjs");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -26,14 +28,12 @@ class RunHistoryStore {
   list(taskId, limit = 50) {
     const target = this.fileFor(taskId);
     if (!fs.existsSync(target)) return [];
-    const records = [];
-    for (const line of fs.readFileSync(target, "utf8").split(/\r?\n/).filter(Boolean)) {
-      try {
-        const parsed = JSON.parse(line);
-        if (parsed && typeof parsed === "object") records.push(parsed);
-      } catch {}
-    }
-    return records.slice(-Math.max(1, Number(limit) || 50)).reverse();
+    const records=readCachedNdjson(target);
+    return records.slice(-Math.max(1, Number(limit) || 50)).reverse().map(record=>({...record}));
+  }
+
+  timing(taskId,liveSession="",currentFormal) {
+    const target=this.fileFor(taskId);return summarizeRuntime(fs.existsSync(target)?readCachedNdjson(target):[],Date.now(),liveSession,currentFormal);
   }
 
   recover(taskId, taskDir) {
@@ -59,6 +59,7 @@ class RunHistoryStore {
 
 function sanitizeEvent(event) {
   const allowed = [
+    "workerAction","workerSession","timingVersion","listedBaseline","listed_count","wait_ms","backoff_ms",
     "type", "status", "message", "code", "candidate_count", "processed", "plain_contact_count",
     "qualified_plain_contact_count", "output", "artifact", "artifactModifiedAt", "batchId", "queueId",
   ];

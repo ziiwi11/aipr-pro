@@ -1,13 +1,92 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+import json
+import io
+from pathlib import Path
+from unittest.mock import patch
+from contextlib import redirect_stdout
 
 import openpyxl
 
-from export_original_format_with_contacts import append_unmatched_rows
+from export_original_format_with_contacts import append_unmatched_rows, build_maps, match_row, main
 
 
 class OriginalExportTest(unittest.TestCase):
+    def match_imported_row(self, values, rows):
+        book = openpyxl.Workbook()
+        sheet = book.active
+        sheet.title = "名单"
+        headers = {"主页身份ID": 1, "抖音主页": 2, "达人昵称": 3, "品牌来源": 4}
+        sheet.append(list(headers))
+        sheet.append(values)
+        return match_row(sheet.title, 2, headers, sheet, *build_maps(rows))
+
+    def test_new_workbook_identity_overrides_old_source_position(self):
+        wrong = {"主页身份ID": "old", "源表": "名单", "源行": 2, "达人昵称": "旧达人"}
+        correct = {"主页身份ID": "new", "达人昵称": "新达人"}
+        self.assertIs(self.match_imported_row(["new", "", "新达人", ""], [wrong, correct]), correct)
+
+    def test_unknown_identity_does_not_inherit_old_contacts(self):
+        old = {"主页身份ID": "old", "源表": "名单", "源行": 2, "达人昵称": "同名"}
+        self.assertIsNone(self.match_imported_row(["unknown", "", "同名", ""], [old]))
+
+    def test_url_overrides_old_source_position(self):
+        old = {"主页身份ID": "old", "源表": "名单", "源行": 2}
+        correct = {"抖音主页": "https://douyin.example/new"}
+        self.assertIs(self.match_imported_row(["", "https://douyin.example/new?from=search", "", ""], [old, correct]), correct)
+
+    def test_row_position_without_identity_is_not_evidence(self):
+        old = {"主页身份ID": "old", "源表": "名单", "源行": 2}
+        self.assertIsNone(self.match_imported_row(["", "", "", ""], [old]))
+
+    def test_same_name_without_identity_is_ambiguous(self):
+        rows = [{"主页身份ID": "one", "达人昵称": "同名"}, {"主页身份ID": "two", "达人昵称": "同名"}]
+        self.assertIsNone(self.match_imported_row(["", "", "同名", ""], rows))
+
+    def test_unique_name_without_identity_can_match(self):
+        row = {"主页身份ID": "one", "达人昵称": "唯一", "品牌来源": "品牌"}
+        self.assertIs(self.match_imported_row(["", "", "唯一", "品牌"], [row]), row)
+
+    def test_export_completion_is_single_json_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.xlsx"
+            delivery = Path(directory) / "delivery.json"
+            book = openpyxl.Workbook()
+            book.active.append(["达人昵称", "主页身份ID", "联系方式"])
+            book.save(source)
+            delivery.write_text(json.dumps({"rows": []}))
+            output = io.StringIO()
+            with patch("sys.argv", ["export", "--source", str(source), "--delivery", str(delivery), "--out-dir", directory]), redirect_stdout(output):
+                main()
+            self.assertEqual(len(output.getvalue().splitlines()), 1)
+            event = json.loads(output.getvalue())
+            self.assertEqual(event["status"], "original_export_finished")
+            self.assertTrue(Path(event["output"]).exists())
+
+    def test_macro_workbook_is_rejected_before_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("sys.argv", ["export", "--source", "protected.xlsm", "--delivery", "unused.json", "--out-dir", directory]):
+                with self.assertRaisesRegex(ValueError, "仅支持 XLSX"):
+                    main()
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_missing_contact_header_does_not_report_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.xlsx"
+            delivery = Path(directory) / "delivery.json"
+            book = openpyxl.Workbook()
+            book.active.append(["达人昵称", "无联系方式"])
+            book.save(source)
+            delivery.write_text(json.dumps({"rows": []}))
+            original = source.read_bytes()
+            with patch("sys.argv", ["export", "--source", str(source), "--delivery", str(delivery), "--out-dir", directory]):
+                with self.assertRaisesRegex(ValueError, "联系方式列"):
+                    main()
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(len(list(Path(directory).glob("*.xlsx"))), 1)
+
     def test_appends_new_creator_using_original_headers(self) -> None:
         workbook = openpyxl.Workbook()
         sheet = workbook.active

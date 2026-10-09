@@ -26,26 +26,32 @@ function discoverDeliveryArtifacts(deliveryPath) {
   }
   const outputDir = path.dirname(resolved);
   const declared = delivery.artifacts || {};
+  const declaredOr=(key,fallback)=>Object.prototype.hasOwnProperty.call(declared,key) ? declared[key] : fallback();
   const candidates = {
-    finalJson: declared.finalJson || resolved,
-    standardXlsx: declared.standardXlsx || findLatest(outputDir, (name) => name.endsWith(".xlsx") && name.includes("最终达人名单")),
-    originalXlsx: declared.originalXlsx || findLatest(outputDir, (name) => name.endsWith(".xlsx") && name.includes("原格式补联系方式")),
-    robotNdjson: declared.robotNdjson || findLatest(outputDir, (name) => name.endsWith(".ndjson")),
-    robotBatchJson: declared.robotBatchJson || findLatest(outputDir, (name) => name.endsWith(".json") && (name.includes("机器人批量") || name.includes("robot-batch"))),
-    handoffManifest: declared.handoffManifest || findLatest(outputDir, (name) => name.endsWith(".json") && name.includes("交接清单")),
+    finalJson: resolved,
+    standardXlsx: declaredOr("standardXlsx", () => findLatest(outputDir, (name) => name.endsWith(".xlsx") && name.includes("最终达人名单"))),
+    originalXlsx: declaredOr("originalXlsx", () => findLatest(outputDir, (name) => name.endsWith(".xlsx") && name.includes("原格式补联系方式"))),
+    robotNdjson: declaredOr("robotNdjson", () => findLatest(outputDir, (name) => name.endsWith(".ndjson"))),
+    robotBatchJson: declaredOr("robotBatchJson", () => findLatest(outputDir, (name) => name.endsWith(".json") && (name.includes("机器人批量") || name.includes("robot-batch")))),
+    handoffManifest: declaredOr("handoffManifest", () => findLatest(outputDir, (name) => name.endsWith(".json") && name.includes("交接清单"))),
   };
   const files = Object.fromEntries(Object.entries(candidates).map(([key, target]) => [key, artifact(key, target)]));
   const result = {
     deliveryPath: resolved,
     outputDir,
     files,
+    available: Boolean(files.finalJson?.exists),
+    artifacts: Object.fromEntries(Object.values(files).filter(file => file.exists)
+      .map(file => [file.label, file.path])),
     metrics: {
+      exportedCount: Array.isArray(delivery.rows) ? delivery.rows.length : 0,
       candidateCount: numberOr(delivery.candidate_count, delivery.rows?.length || 0),
       plainContactCount: numberOr(delivery.plain_contact_count, 0),
       wechatCount: numberOr(delivery.wechat_contact_count, 0),
       phoneCount: numberOr(delivery.phone_contact_count, 0),
       robotCount: numberOr(delivery.robot_queue_count, delivery.robot_queue?.length || 0),
     },
+    exportTemplate: delivery.export_template || {name:"历史模板",version:1},
     robotContractVersion: String(delivery.robot_contract_version || ""),
     createdAt: String(delivery.created_at || ""),
   };
@@ -59,13 +65,14 @@ function discoverDeliveryArtifacts(deliveryPath) {
 
 function buildRehearsalReadiness(center = {}) {
   const files = center.files || {};
-  const required = Object.keys(ARTIFACT_LABELS);
+  const originalOptional = !files.originalXlsx?.path;
+  const required = Object.keys(ARTIFACT_LABELS).filter(key=>key!=="originalXlsx" || !originalOptional);
   const missing = required.filter((key) => !files[key]?.exists);
   const robotCount = Number(center.metrics?.robotCount) || 0;
   const candidateCount = Number(center.metrics?.candidateCount) || 0;
   const checks = [
     { key: "delivery-data", label: "最终名单可读取", passed: Boolean(files.finalJson?.exists && candidateCount > 0) },
-    { key: "spreadsheets", label: "标准表与原格式表齐全", passed: Boolean(files.standardXlsx?.exists && files.originalXlsx?.exists) },
+    { key: "spreadsheets", label: originalOptional ? "标准表齐全（未提供原表）" : "标准表与原格式表齐全", passed: Boolean(files.standardXlsx?.exists && (originalOptional || files.originalXlsx?.exists)) },
     { key: "robot-files", label: "机器人双格式齐全", passed: Boolean(files.robotNdjson?.exists && files.robotBatchJson?.exists) },
     { key: "robot-records", label: "存在待建联任务", passed: robotCount > 0 },
     { key: "handoff-manifest", label: "交接清单已生成", passed: Boolean(files.handoffManifest?.exists) },

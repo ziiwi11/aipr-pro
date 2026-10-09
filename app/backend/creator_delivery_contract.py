@@ -6,6 +6,11 @@ from datetime import datetime
 from typing import Any, Iterable
 
 
+try:
+    from .content_policy import content_policy
+except ImportError:
+    from content_policy import content_policy
+
 ROBOT_CONTRACT_VERSION = "aipr.robot.outreach.v1"
 
 
@@ -119,7 +124,7 @@ def normalize_contact_value(value: Any) -> str:
     text = compact(value).lower()
     if not text or any(marker in text for marker in ("*", "暂无", "未公开", "不可见", "待补")):
         return ""
-    for normalizer in (normalize_phone_value, normalize_email_value, normalize_wechat_value):
+    for normalizer in (normalize_email_value, normalize_wechat_value, normalize_phone_value):
         if normalized := normalizer(text):
             return normalized
     return re.sub(r"\s+", "", text)
@@ -137,9 +142,14 @@ def normalize_wechat_value(value: Any) -> str:
     text = compact(value).lower()
     if not text or "*" in text:
         return ""
-    if normalize_phone_value(text):
+    # Channel evidence takes precedence: A13800000000 is a full WeChat ID,
+    # not the phone-number substring inside it. Numeric WeChat aliases remain
+    # valid only when the entire value is a phone number.
+    if re.fullmatch(r"[a-z][a-z0-9_-]{5,19}", text):
+        return text
+    if re.fullmatch(r"(?:\+?86[\s-]?)?1[3-9]\d{9}", text):
         return normalize_phone_value(text)
-    return text if re.fullmatch(r"[a-z][a-z0-9_-]{5,19}", text) else ""
+    return ""
 
 
 def normalize_email_value(value: Any) -> str:
@@ -147,6 +157,13 @@ def normalize_email_value(value: Any) -> str:
     if not text or "*" in text:
         return ""
     return text if re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", text) else ""
+
+
+def manual_contact_normalizer(candidate, normalizer):
+    # Human-labelled channel revisions are explicit; appearance is not channel evidence.
+    if candidate.get("contact_correction_revision"):
+        return lambda value: re.sub(r"\s+", "", compact(value)).lower() if compact(value) and "*" not in compact(value) else ""
+    return normalizer
 
 
 def canonicalize_contact_fields(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -159,7 +176,7 @@ def canonicalize_contact_fields(candidate: dict[str, Any]) -> dict[str, Any]:
     for keys, normalizer in groups:
         for key in keys:
             if key in current and compact(current.get(key)):
-                current[key] = normalizer(current.get(key))
+                current[key] = manual_contact_normalizer(candidate, normalizer)(current.get(key))
     return current
 
 
@@ -173,7 +190,7 @@ def contact_identity_values(candidate: dict[str, Any]) -> set[str]:
         normalized
         for keys, normalizer in groups
         for key in keys
-        if (normalized := normalizer(candidate.get(key)))
+        if (normalized := manual_contact_normalizer(candidate, normalizer)(candidate.get(key)))
     }
 
 
@@ -222,7 +239,7 @@ def requires_underwear_product_evidence(rules: dict[str, Any]) -> bool:
     ))
 
 
-def score_candidate(candidate: dict[str, Any], rules: dict[str, Any]) -> dict[str, Any]:
+def _score_candidate_rules(candidate: dict[str, Any], rules: dict[str, Any], semantic_review: bool = False) -> dict[str, Any]:
     evidence = " ".join([
         compact(candidate.get("nickname")),
         compact(candidate.get("profile_text")),
@@ -366,9 +383,9 @@ def score_candidate(candidate: dict[str, Any], rules: dict[str, Any]) -> dict[st
         "母婴宠物": ("母婴", "育儿", "婴儿", "宠物"),
         "食品饮料": ("食品", "零食", "饮料", "冲饮"),
     }.get(category, ())
-    if category_terms and not any(term in evidence for term in category_terms):
+    if not semantic_review and category_terms and not any(term in evidence for term in category_terms):
         return {"score": 0, "excluded": True, "decision": "淘汰", "reason": f"内容与{category}类目不匹配", "sales": sales, "level": level}
-    if compact(rules.get("contentType")) == "真人口播" and not any(
+    if not semantic_review and compact(rules.get("contentType")) == "真人口播" and not any(
         term in evidence for term in ("真人", "口播", "试穿", "上身", "测评", "穿搭")
     ):
         return {"score": 0, "excluded": True, "decision": "淘汰", "reason": "缺少真人口播或真人展示证据", "sales": sales, "level": level}
@@ -397,6 +414,40 @@ def score_candidate(candidate: dict[str, Any], rules: dict[str, Any]) -> dict[st
     return {"score": score, "excluded": False, "decision": decision, "reason": reason, "sales": sales, "level": level}
 
 
+
+def score_candidate(candidate: dict[str, Any], rules: dict[str, Any]) -> dict[str, Any]:
+    rules = content_policy(rules)
+    if __package__:
+        from .jev_local_client import decision_enabled
+        from .creator_jev import review
+        from .jev_evidence import enrich_for_jev
+    else:
+        from jev_local_client import decision_enabled
+        from creator_jev import review
+        from jev_evidence import enrich_for_jev
+    presentation = rules.get('contentPresentation', 'any')
+    if presentation != 'any' and not candidate.get('presentation_evidence'):
+        return {'score': 0, 'excluded': False, 'decision': '待内容复核', 'reason': '缺少具体作品的出镜方式证据，需核对真人/手部/纯产品展示', 'sales': _sales(candidate), 'level': 1}
+    use_jev = decision_enabled("aipr-pro")
+    result = _score_candidate_rules(candidate, rules, semantic_review=use_jev)
+    if not use_jev or result.get("decision") not in ("推荐建联", "待补联系方式"):
+        return result
+    judgment = review(enrich_for_jev(candidate), rules, "aipr-pro")
+    route = judgment.get("route", "uncertain")
+    # Model uncertainty is distinct from human notes and contact reachability.
+    result["jev_analysis"] = {**judgment, "advisory_only": False,
+                              "needs_review": route != "supported",
+                              "admission_changed": route != "supported",
+                              "auto_send_allowed": False}
+    if route == "supported":
+        result["reason"] += "；Jev：作品内容匹配"
+    elif route == "review_conflict":
+        result.update(decision="暂不推荐", reason="Jev：作品内容与本次要求冲突，待人工复核")
+    else:
+        result.update(decision="待内容复核", reason="Jev：" + judgment.get("reason", "证据不足或判断不确定"))
+    return result
+
+
 def mark_precontact_qualification(candidate: dict[str, Any], rules: dict[str, Any]) -> dict[str, Any]:
     current = dict(candidate)
     probe = dict(current)
@@ -418,7 +469,10 @@ def mark_precontact_qualification(candidate: dict[str, Any], rules: dict[str, An
             strict["plain_contact"] = probe["buyin_contact_wechat"]
             probe["osmana_evaluation"] = strict
     evaluation = score_candidate(probe, rules)
+    if evaluation.get("jev_analysis"):
+        current["jev_analysis"] = evaluation["jev_analysis"]
     current["precontact_qualified"] = evaluation.get("decision") == "推荐建联"
+    current["precontact_decision"] = evaluation.get("decision", "")
     current["precontact_reason"] = evaluation.get("reason", "")
     current["precontact_sales"] = evaluation.get("sales", 0)
     current["precontact_level"] = evaluation.get("level", 1)
@@ -518,6 +572,22 @@ def build_delivery(
             "抖音号": _plain(candidate, "douyin_id", "douyin_account_id", "unique_id", "buyin_account_id"),
             "抖音主页": _plain(candidate, "douyin_homepage"),
             "精选联盟主页": _plain(candidate, "buyin_profile_url", "精选联盟主页"),
+            "粉丝数": candidate.get("fans", ""),
+            "城市": candidate.get("city", ""),
+            "类目": candidate.get("category", ""),
+            "主要带货方式": candidate.get("main_sale_type", ""),
+            "近30天视频数": candidate.get("video_count_30d", ""),
+            "平台月销区间下界": candidate.get("monthly_sales_low", candidate.get("monthly_sales_value", "")),
+            "平台月销区间上界": candidate.get("monthly_sales_high", ""),
+            "销售数据口径": "平台区间；下界不代表精确销售额",
+            "达人简介与平台资料": candidate.get("profile_text", ""),
+            "作品文字与近期内容": candidate.get("douyin_content_text") or (
+                "精选联盟已保存内容证据（含作品标题与商品名）：\n" + evidence_text
+                if evidence_text else ""
+            ),
+            "作品证据来源": candidate.get("content_evidence_source", ""),
+            "作品复核时间": candidate.get("evidence_reviewed_at", ""),
+            "平台入库状态": candidate.get("ui_add_library_status", ""),
             "达人等级": f"LV{evaluation.get('level', 1)}",
             "历史销售额": evaluation.get("sales", 0),
             "综合评分": evaluation["score"],
@@ -540,7 +610,10 @@ def build_delivery(
             "手机号": phone,
             "邮箱": email,
             "联系方式来源": _plain(candidate, "buyin_contact_source", "cart_contact_source"),
-            "联系方式状态": "已获取明文" if contact else "待补",
+            "联系方式获取时间": _plain(candidate, "contact_acquired_at", "ui_contact_channels_checked_at", "ui_contact_probe_at"),
+            "联系方式修订时间": _plain(candidate, "contact_corrected_at"),
+            "联系人修订版本": candidate.get("contact_correction_revision", ""),
+            "联系方式状态": "已获取明文，尚未验证可达性" if contact else "待补",
             "验证结论": "主页与内容已验证" if candidate.get("content_evidence_reviewed") else "待内容复核",
             "分跑店铺": _plain(candidate, "shop", "lip_shop"),
         }
@@ -559,7 +632,7 @@ def build_delivery(
             jev_input = enrich_for_jev(candidate)
         except Exception:
             jev_input = candidate
-        advisory = jev_review(jev_input, rules, 'aipr-pro')
+        advisory = evaluation.get('jev_analysis') or jev_review(jev_input, rules, 'aipr-pro')
         if advisory.get('enabled'):
             row['Jev内容复核'] = json.dumps(advisory, ensure_ascii=False)
         rows.append(row)

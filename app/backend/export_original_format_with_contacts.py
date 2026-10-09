@@ -34,6 +34,7 @@ def build_maps(rows: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], d
     by_url: dict[str, dict[str, Any]] = {}
     by_name_brand: dict[str, dict[str, Any]] = {}
     by_source: dict[tuple[str, int], dict[str, Any]] = {}
+    ambiguous_names: set[str] = set()
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -49,8 +50,12 @@ def build_maps(rows: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], d
         if url and url not in by_url:
             by_url[url] = row
         name_brand = "|".join([compact(row.get("品牌来源")), compact(row.get("达人昵称"))])
-        if name_brand.strip("|") and name_brand not in by_name_brand:
-            by_name_brand[name_brand] = row
+        if compact(row.get("达人昵称")) and name_brand not in ambiguous_names:
+            if name_brand in by_name_brand:
+                by_name_brand.pop(name_brand)
+                ambiguous_names.add(name_brand)
+            else:
+                by_name_brand[name_brand] = row
         try:
             source_row = int(row.get("源行"))
             source_sheet = compact(row.get("源表"))
@@ -111,18 +116,17 @@ def match_row(
     by_name_brand: dict[str, dict[str, Any]],
     by_source: dict[tuple[str, int], dict[str, Any]],
 ) -> dict[str, Any] | None:
-    direct = by_source.get((ws_title, row_index))
-    if direct:
-        return direct
     identity = compact(ws.cell(row_index, headers.get("主页身份ID", 0)).value) if headers.get("主页身份ID") else ""
-    if identity and identity in by_id:
-        return by_id[identity]
+    if identity:
+        # A row number belongs to the imported workbook, not to a creator.
+        # Explicit identities must never fall back to an old source row/name.
+        return by_id.get(identity)
     url = norm_url(ws.cell(row_index, headers.get("抖音主页", 0)).value) if headers.get("抖音主页") else ""
-    if url and url in by_url:
-        return by_url[url]
+    if url:
+        return by_url.get(url)
     name = compact(ws.cell(row_index, headers.get("达人昵称", 0)).value) if headers.get("达人昵称") else ""
     brand = compact(ws.cell(row_index, headers.get("品牌来源", 0)).value) if headers.get("品牌来源") else ""
-    if name or brand:
+    if name:
         return by_name_brand.get("|".join([brand, name]))
     return None
 
@@ -199,12 +203,16 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     source = Path(args.source)
+    if source.suffix.lower() != ".xlsx":
+        raise ValueError("原格式导出仅支持 XLSX；请先另存为 XLSX，避免丢失宏")
     delivery = Path(args.delivery)
     data = json.loads(delivery.read_text(encoding="utf-8"))
     rows = [row for row in data.get("rows") or [] if isinstance(row, dict)]
     by_id, by_url, by_name_brand, by_source = build_maps(rows)
 
     workbook = openpyxl.load_workbook(source)
+    if not any((header := find_header_row(ws)) and "联系方式" in [compact(ws.cell(header, col).value) for col in range(1, ws.max_column + 1)] for ws in workbook.worksheets):
+        raise ValueError("原始表格需包含达人昵称、主页身份ID或抖音主页中的身份列，以及联系方式列；原文件未修改")
     touched_rows = 0
     contact_rows = 0
     matched_row_ids: set[int] = set()
@@ -245,6 +253,7 @@ def main() -> None:
     print(
         json.dumps(
             {
+                "status": "original_export_finished",
                 "output": str(output),
                 "delivery": str(delivery),
                 "touched_rows": touched_rows,
@@ -254,7 +263,6 @@ def main() -> None:
                 "wechat_contact_count": data.get("wechat_contact_count"),
             },
             ensure_ascii=False,
-            indent=2,
         )
     )
 

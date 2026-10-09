@@ -56,6 +56,12 @@ class RealtimeCreatorFlowStoreTests(unittest.TestCase):
         self.assertFalse(has_authorized_plaintext({"buyin_contact_wechat": "***"}))
         self.assertFalse(has_authorized_plaintext({"contact_visible": True}))
 
+    def test_email_only_contacts_require_valid_unmasked_address(self) -> None:
+        for key in ("buyin_contact_email", "cart_contact_email", "email", "邮箱"):
+            self.assertTrue(has_authorized_plaintext({key: "creator@example.com"}))
+            for invalid in ("c***@example.com", "未授权", "example.com", "creator@"):
+                self.assertFalse(has_authorized_plaintext({key: invalid}))
+
     def test_terminal_states_cannot_move_back_into_processing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RealtimeCreatorFlowStore(Path(directory) / "flow.json")

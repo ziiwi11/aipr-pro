@@ -173,3 +173,18 @@ test("darwin/arm64 仍被判定为受支持", () => {
   assert.strictEqual(r.supported, true);
   assert.strictEqual(r.ready, true);
 });
+
+test('a new computer can use initialized embedded views without separately installing Chrome',()=>{
+ const ready=buildPlatformReadiness({platform:'win32',arch:'x64',pythonExe:'C:\\app\\python.exe',browserExe:'',embeddedBrowserAvailable:true,documentsDir:'C:\\Docs',writable:true});
+ assert.strictEqual(ready.ready,true);assert.strictEqual(ready.checks.find(x=>x.key==='browser').detail,'软件内置浏览器已初始化');
+ const waiting=buildPlatformReadiness({platform:'win32',arch:'x64',pythonExe:'C:\\app\\python.exe',browserExe:'',embeddedBrowserAvailable:false,documentsDir:'C:\\Docs',writable:true});assert.strictEqual(waiting.ready,false);
+});
+
+
+test('embedded browser identifies the installed platform and actual Chromium version', () => {
+ const {buildEmbeddedUserAgent}=require('./platform-runtime.cjs');
+ const windows=buildEmbeddedUserAgent({platform:'win32',chromeVersion:'150.0.7814.12'});
+ assert.ok(windows.includes('(Windows NT 10.0; Win64; x64)'));assert.ok(!windows.includes('Macintosh'));assert.ok(windows.includes('Chrome/150.0.7814.12'));
+ const mac=buildEmbeddedUserAgent({platform:'darwin',chromeVersion:'150.0.7814.12'});assert.ok(mac.includes('Macintosh'));assert.ok(!mac.includes('Windows NT'));
+ assert.throws(()=>buildEmbeddedUserAgent({platform:'win32',chromeVersion:'150\r\nInjected'}),/Invalid browser version/);
+});

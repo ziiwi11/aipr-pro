@@ -298,3 +298,15 @@ class JevBreakdownTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExportSelectionTest(unittest.TestCase):
+    def test_real_selection_overrides_recommendation_without_marking_other_candidates_exported(self):
+        from roi_dashboard import build_export_roi
+        selected = {"identity":"selected", "content_evidence_reviewed":True,"precontact_qualified":True,"wechat":"wx-selected"}
+        other = {"identity":"other", "content_evidence_reviewed":True,"precontact_qualified":True,"wechat":"wx-other","推荐结论":"推荐建联"}
+        report=build_export_roi([selected,other], [selected])
+        self.assertEqual(report["funnel"]["candidates"],2)
+        self.assertEqual(report["funnel"]["delivered"],1)
+        self.assertIsNone(report["export"]["sent_count"])
+        self.assertNotIn("_delivered",selected)

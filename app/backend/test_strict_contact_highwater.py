@@ -2,10 +2,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from realtime_creator_flow import RealtimeCreatorFlowStore
 
 from audit_strict_contact_highwater import build_strict_contact_highwater
 from creator_delivery_contract import (
     canonicalize_contact_fields,
+    normalize_contact_value,
     contact_identity_values,
     select_delivery_candidates,
 )
@@ -46,6 +48,69 @@ RULES = {
 
 
 class StrictContactHighwaterTest(unittest.TestCase):
+    def test_bulk_contacts_reconcile_old_terminal_and_review_states(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            strategy = root / "strategy.json"
+            historical = root / "historical.json"
+            strategy.write_text(json.dumps(RULES))
+            historical.write_text(json.dumps({}))
+            flow_path = root / "aipr_realtime_creator_flow.json"
+            store = RealtimeCreatorFlowStore(flow_path)
+            store.record("reviewed", "evidence_reviewing", {"identity": "reviewed"})
+            store.record("authorized", "not_authorized", {"identity": "authorized"}, "old denial")
+            store.record("unrelated", "not_authorized", {"identity": "unrelated"})
+            first_seen = store.get("authorized")["first_seen_at"]
+            strict = save_strict_audit(
+                {"candidates": [candidate("reviewed", "wx-review"), candidate("authorized", "wx-authorized")]},
+                strategy, historical, root / "aipr_strict_contact_highwater.json", 10,
+            )
+            store = RealtimeCreatorFlowStore(flow_path)
+            self.assertEqual(store.summary()["listed_count"], 2)
+            self.assertEqual(store.get("authorized")["first_seen_at"], first_seen)
+            self.assertEqual(store.get("authorized")["reason"], "")
+            self.assertEqual(store.get("unrelated")["state"], "not_authorized")
+            self.assertEqual(store.reconcile_strict_selection(strict), 0)
+            with self.assertRaisesRegex(ValueError, "terminal_state_transition"):
+                store.record("authorized", "evidence_reviewing", {})
+
+    def test_invalid_strict_selection_does_not_partially_modify_flow(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = RealtimeCreatorFlowStore(Path(folder) / "flow.json")
+            store.record("kept", "evidence_reviewing", {"identity": "kept"})
+            strict = build_strict_contact_highwater(
+                {"candidates": [candidate("kept", "wx-kept"), candidate("invalid", "wx-invalid")]},
+                RULES, {}, 10,
+            )
+            strict["candidates"][1]["precontact_qualified"] = False
+            before = store.path.read_bytes()
+            with self.assertRaisesRegex(ValueError, "invalid_strict_flow_selection"):
+                store.reconcile_strict_selection(strict)
+            self.assertEqual(store.path.read_bytes(), before)
+            self.assertEqual(store.get("kept")["state"], "evidence_reviewing")
+
+    def test_audited_email_only_contacts_are_reconciled(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = RealtimeCreatorFlowStore(Path(folder) / "flow.json")
+            row = candidate("email", "")
+            row["buyin_contact_email"] = "creator@example.test"
+            strict = build_strict_contact_highwater({"candidates": [row]}, RULES, {}, 10)
+            self.assertEqual(len(strict["candidates"]), 1)
+            self.assertEqual(store.reconcile_strict_selection(strict), 1)
+            self.assertEqual(store.get("email")["state"], "listed")
+
+    def test_incomplete_target_cannot_close_pending_contact_states(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = RealtimeCreatorFlowStore(Path(folder) / "flow.json")
+            store.record("pending", "contact_revealing", {"identity": "pending", "shop": "A"})
+            strict = build_strict_contact_highwater(
+                {"candidates": [candidate("kept", "wx-kept")]}, RULES, {}, 10)
+            before = store.path.read_bytes()
+            with self.assertRaisesRegex(ValueError, "cannot_finish_incomplete_contact_stage"):
+                store.reconcile_strict_selection(strict, finish_contacts=True)
+            self.assertEqual(store.path.read_bytes(), before)
+            self.assertEqual(store.get("pending")["state"], "contact_revealing")
+
     def test_replenishment_contact_temporaries_are_isolated(self):
         payload = {"strategy": {"strategyPurpose": "replenishment-source-only"}}
         self.assertEqual(
@@ -75,6 +140,25 @@ class StrictContactHighwaterTest(unittest.TestCase):
             contact_identity_values(normalized),
             {"13800000000", "wx_valid_123", "creator@example.com"},
         )
+
+    def test_resume_strict_audit_applies_recorded_contact_revision(self):
+        import os
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            filename=Path(temp)/"corrections.json"
+            filename.write_text(json.dumps({"schema":"qianxun-contact-corrections-v1","taskId":"resume","records":[{"creatorId":"a","after":{"wechat":"A13800000000","phone":"","email":""},"source":"historical_platform_ui_prefix_repair","recordedAt":"2026-10-08","revision":1}]}))
+            original=candidate("a","13800000000")
+            with patch.dict(os.environ,{"AIPR_CONTACT_CORRECTIONS":str(filename),"AIPR_TASK_ID":"resume"}):
+                result=build_strict_contact_highwater({"candidates":[original]},RULES,{},1)
+            self.assertEqual(result["candidates"][0]["buyin_contact_wechat"],"a13800000000")
+            self.assertEqual(original["buyin_contact_wechat"],"13800000000")
+
+    def test_wechat_containing_phone_digits_keeps_its_letters(self):
+        row = canonicalize_contact_fields({"buyin_contact_wechat": "A13800000000", "buyin_contact_phone": "13800000000"})
+        self.assertEqual(row["buyin_contact_wechat"], "a13800000000")
+        self.assertEqual(contact_identity_values(row), {"a13800000000", "13800000000"})
+        self.assertEqual(normalize_contact_value("A13800000000"), "a13800000000")
+        self.assertEqual(canonicalize_contact_fields({"buyin_contact_wechat":"13800000000"})["buyin_contact_wechat"], "13800000000")
 
     def test_invalid_contact_placeholders_do_not_count_as_plain_contacts(self):
         row = {
@@ -184,3 +268,15 @@ class StrictContactHighwaterTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SavedListProgressTests(unittest.TestCase):
+    def test_progress_tracks_real_completed_rows_without_revealing_contacts(self):
+        from unittest.mock import patch
+        events = []
+        with patch("audit_strict_contact_highwater.mark_precontact_qualification", side_effect=lambda row, rules: row), patch("audit_strict_contact_highwater.select_delivery_candidates", return_value=[]), patch("audit_strict_contact_highwater._assert_strict_invariants", return_value={}):
+            result = build_strict_contact_highwater({"candidates": [{"identity":str(i)} for i in range(27)]}, {}, {}, progress=events.append)
+        self.assertEqual([e["completed"] for e in events], [0,25,27])
+        self.assertTrue(all(e["total"] == 27 for e in events))
+        self.assertFalse(any("contact" in e for e in events))
+        self.assertEqual(result["source_candidate_count"],27)

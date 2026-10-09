@@ -34,13 +34,8 @@ def _rate(numerator: int, denominator: int) -> str:
 
 
 def _has_contact(row: dict[str, Any]) -> bool:
-    return bool(
-        row.get("buyin_contact_phone")
-        or row.get("buyin_contact_wechat")
-        or row.get("cart_contact_phone")
-        or row.get("cart_contact_wechat")
-        or row.get("buyin_contact_email")
-    )
+    values = [row.get(key) for key in ("buyin_contact_phone", "buyin_contact_wechat", "cart_contact_phone", "cart_contact_wechat", "buyin_contact_email", "cart_contact_email", "phone", "wechat", "email", "手机号", "微信", "邮箱")]
+    return any(str(value or "").strip() and not any(marker in str(value) for marker in ("*", "•", "隐藏", "未授权", "待获取", "待补", "暂无", "不可见")) for value in values)
 
 
 def _is_verified(row: dict[str, Any]) -> bool:
@@ -53,6 +48,8 @@ def _is_qualified(row: dict[str, Any]) -> bool:
 
 def _is_delivered(row: dict[str, Any]) -> bool:
     """已进入交付名单（有推荐结论且非淘汰）。"""
+    if "_delivered" in row:
+        return row["_delivered"] is True
     decision = str(row.get("推荐结论") or row.get("decision") or "")
     if decision:
         return "推荐" in decision
@@ -200,7 +197,7 @@ def build_jev_breakdown(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
     cloud_errors = 0
 
     for row in items:
-        jev = _parse_jev(row.get("Jev内容复核"))
+        jev = _parse_jev(row.get("Jev内容复核") or row.get("jev_analysis"))
         if not jev or not jev.get("enabled"):
             continue
         enabled += 1
@@ -415,3 +412,17 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def build_export_roi(candidates, selected, task_meta=None):
+    """Use actual export selection rather than an earlier recommendation flag."""
+    def identity(row):
+        for field in ("identity", "buyin_uid", "douyin_id", "id", "主页身份ID"):
+            if row.get(field):
+                return ("id", str(row[field]))
+        return ("row", json.dumps(row, sort_keys=True, ensure_ascii=False, default=str))
+    selected_keys = {identity(row) for row in selected if isinstance(row, dict)}
+    items = [{**row, "_delivered": identity(row) in selected_keys} for row in candidates if isinstance(row, dict)]
+    report = build_roi(items, task_meta)
+    report["export"] = {"selected_count": len(selected_keys), "candidate_scope": "saved_input_candidates", "sent_count": None}
+    return report

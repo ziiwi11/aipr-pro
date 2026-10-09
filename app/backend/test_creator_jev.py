@@ -54,13 +54,13 @@ class EnabledTest(unittest.TestCase):
         """若配置目录存在且包含该 app，则启用。"""
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("JEV_INTEGRATION", None)
-            root = jev_local_client.ROOT
-            if not (root / "enabled-apps").exists():
-                self.skipTest("本机未配置 JEV（enabled-apps 不存在）")
-            apps = (root / "enabled-apps").read_text().splitlines()
-            if "aipr-pro" not in apps:
-                self.skipTest("aipr-pro 不在白名单")
-            self.assertTrue(jev_local_client.enabled("aipr-pro"))
+            import tempfile
+            from pathlib import Path
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "enabled-apps").write_text("aipr-pro\n")
+                with mock.patch.object(jev_local_client, "ROOT", root):
+                    self.assertTrue(jev_local_client.enabled("aipr-pro"))
 
 
 class ReviewDisabledTest(unittest.TestCase):
@@ -87,6 +87,18 @@ class ReviewMissingInputTest(unittest.TestCase):
         self.assertTrue(result["enabled"])
         self.assertEqual(result["route"], "uncertain")
         self.assertFalse(result["admission_changed"])
+
+    def test_observed_titles_replace_platform_profile_noise(self) -> None:
+        with mock.patch.object(creator_jev, "decide", return_value={
+            "answers": {"content_fit": {"choice": "supported", "confidence": .9}}
+        }) as decide:
+            creator_jev.review({**FULL_CREATOR, "recent_titles": ["保湿面霜使用体验"],
+                                "recent_products": ["保湿面霜"]}, FULL_RULES, "aipr-pro")
+        content = decide.call_args.args[0]["state"]["content"]
+        self.assertEqual(content["recent_titles"], ["保湿面霜使用体验"])
+        self.assertEqual(content["recent_products"], ["保湿面霜"])
+        self.assertNotIn("profile_text", content)
+        self.assertNotIn("content_evidence", content)
 
     def test_missing_rules_returns_uncertain(self) -> None:
         result = creator_jev.review(FULL_CREATOR, {}, "aipr-pro")
@@ -117,6 +129,18 @@ class ReviewServiceFailureTest(unittest.TestCase):
         self.assertEqual(result["route"], "uncertain")
         self.assertIn("不可用", result.get("reason", ""))
         self.assertFalse(result["admission_changed"])
+
+    def test_http_status_is_preserved_without_response_body_or_credentials(self):
+        import urllib.error
+        for code in (402, 429, 503):
+            with mock.patch.object(creator_jev, 'decide', side_effect=urllib.error.HTTPError(
+                    'https://api.typesafe.ai/v1/systemone', code, 'private-server-message', {}, None)):
+                result = creator_jev.review(FULL_CREATOR, FULL_RULES, 'aipr-pro')
+            self.assertEqual(result['http_status'], code)
+            self.assertEqual(result['action_required'], code == 402)
+            self.assertEqual(result['retryable'], code != 402)
+            self.assertEqual(result['route'], 'uncertain')
+            self.assertNotIn('private-server-message', json.dumps(result))
 
     def test_invalid_route_degrades_gracefully(self) -> None:
         bad = {"answers": {"content_fit": {"choice": "not-a-valid-route", "confidence": 0.9}}}
@@ -152,6 +176,71 @@ class ReviewSuccessTest(unittest.TestCase):
             creator_jev.review(FULL_CREATOR, FULL_RULES, "aipr-pro")
             creator_jev.review(FULL_CREATOR, FULL_RULES, "aipr-pro")
         self.assertEqual(m.call_count, 1, "第二次应命中缓存")
+
+    def test_large_audit_keeps_earlier_judgments_after_256_rows(self) -> None:
+        ok = {"answers": {"content_fit": {"choice": "supported", "confidence": .9}}}
+        with mock.patch.object(creator_jev, "decide", return_value=ok) as request:
+            for i in range(300):
+                creator_jev.review({**FULL_CREATOR, "douyin_content_text": f"护肤作品{i}"}, FULL_RULES, "aipr-pro")
+            creator_jev.review({**FULL_CREATOR, "douyin_content_text": "护肤作品0"}, FULL_RULES, "aipr-pro")
+        self.assertEqual(request.call_count, 300)
+
+    def test_cache_reuses_unchanged_evidence_during_long_audit(self) -> None:
+        ok = {"answers": {"content_fit": {"choice": "supported", "confidence": .9}}}
+        with mock.patch.object(creator_jev, "decide", return_value=ok) as request, mock.patch.object(creator_jev.time, "monotonic", return_value=100):
+            creator_jev.review(FULL_CREATOR, FULL_RULES, "aipr-pro")
+        with mock.patch.object(creator_jev, "decide", return_value=ok) as second, mock.patch.object(creator_jev.time, "monotonic", return_value=800):
+            creator_jev.review(FULL_CREATOR, FULL_RULES, "aipr-pro")
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(second.call_count, 0)
+
+    def test_persisted_judgment_survives_process_cache_reset(self) -> None:
+        ok = {"answers": {"content_fit": {"choice": "supported", "confidence": .9}}}
+        with mock.patch.object(creator_jev, "decide", return_value=ok) as request:
+            first = creator_jev.review(FULL_CREATOR, FULL_RULES, "aipr-pro")
+            creator_jev._cache.clear()
+            second = creator_jev.review({**FULL_CREATOR, "jev_analysis": first}, FULL_RULES, "aipr-pro")
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(second["route"], "supported")
+        self.assertFalse(second["auto_send_allowed"])
+
+    def test_discovery_category_change_reuses_same_content_policy_but_real_requirement_change_does_not(self):
+        ok = {"answers":{"content_fit":{"choice":"supported","confidence":.9}}}
+        with mock.patch.object(creator_jev,"decide",return_value=ok) as call:
+            first=creator_jev.review(FULL_CREATOR,FULL_RULES,"aipr-pro")
+            creator_jev._cache.clear()
+            row={**FULL_CREATOR,"jev_analysis":first}
+            switched={**FULL_RULES,"category":"个护家清","contentFitCategory":"美妆个护"}
+            result=creator_jev.review(row,switched,"aipr-pro")
+            self.assertEqual(call.call_count,1)
+            self.assertEqual(result["route"],"supported")
+            creator_jev.review(row,{**switched,"brief":"仅接受具体唇妆作品"},"aipr-pro")
+            self.assertEqual(call.call_count,2)
+
+    def test_platform_video_alias_reuses_saved_judgment_without_paid_call(self):
+        ok = {"answers":{"content_fit":{"choice":"supported","confidence":.9}}}
+        original={**FULL_RULES,"contentType":"短视频"}
+        with mock.patch.object(creator_jev,"decide",return_value=ok) as call:
+            first=creator_jev.review(FULL_CREATOR,original,"aipr-pro")
+            creator_jev._cache.clear()
+            with mock.patch.dict(os.environ, {"AIPR_JEV_SAVED_ONLY":"1"}):
+                result=creator_jev.review({**FULL_CREATOR,"jev_analysis":first},
+                    {**original,"contentType":"视频达人"},"aipr-pro")
+            self.assertEqual(call.call_count,1)
+            self.assertEqual(result["route"],"supported")
+            self.assertFalse(result["auto_send_allowed"])
+
+    def test_changed_evidence_rules_or_policy_requires_new_judgment(self) -> None:
+        ok = {"answers": {"content_fit": {"choice": "supported", "confidence": .9}}}
+        with mock.patch.object(creator_jev, "decide", return_value=ok) as request:
+            first = creator_jev.review(FULL_CREATOR, FULL_RULES, "aipr-pro")
+            row = {**FULL_CREATOR, "jev_analysis": first}
+            creator_jev.review({**row, "douyin_content_text": "运动训练"}, FULL_RULES, "aipr-pro")
+            creator_jev.review(row, {**FULL_RULES, "brief": "仅接受唇部测评"}, "aipr-pro")
+            with mock.patch.object(creator_jev, "settings", return_value={"confidence_threshold": .99}):
+                result = creator_jev.review(row, FULL_RULES, "aipr-pro")
+        self.assertEqual(request.call_count, 4)
+        self.assertEqual(result["route"], "uncertain")
 
 
 class ReviewRouteTest(unittest.TestCase):
@@ -200,3 +289,25 @@ class PayloadShapeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class PresentationEvidenceTest(unittest.TestCase):
+    def test_titles_or_avatar_do_not_prove_real_person(self):
+        with mock.patch.object(creator_jev, 'enabled', return_value=True), mock.patch.object(creator_jev, 'decide') as call:
+            result = creator_jev.review({'recent_titles':['真人试用唇蜜'], 'bio':'真人测评'}, {'category':'美妆个护','contentPresentation':'real_person'}, 'aipr-pro')
+            self.assertEqual(result['route'], 'uncertain')
+            self.assertIn('出镜方式证据', result['reason'])
+            call.assert_not_called()
+
+class LegacyPresentationCompatibilityTest(unittest.TestCase):
+    def test_unlimited_new_fields_preserve_old_judgment(self):
+        response={'answers':{'content_fit':{'choice':'supported','confidence':0.9}}}
+        creator_jev._cache.clear()
+        with mock.patch.object(creator_jev,'enabled',return_value=True), mock.patch.object(creator_jev,'settings',return_value={}), mock.patch.object(creator_jev,'decide',return_value=response) as call:
+            creator={'recent_titles':['保湿护肤日常分享']}
+            rules={'category':'美妆个护'}
+            first=creator_jev.review(creator,rules,'compatibility-test')
+            self.assertEqual(first['judgment_version'],'content-fit-2026-10-02-v1')
+            creator_jev._cache.clear()
+            second=creator_jev.review({**creator,'jev_analysis':first},{**rules,'creatorType':'不限内容类型','contentPresentation':'any'},'compatibility-test')
+            self.assertEqual(second['evidence_sha256'],first['evidence_sha256'])
+            self.assertEqual(call.call_count,1)

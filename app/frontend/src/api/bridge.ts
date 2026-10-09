@@ -19,6 +19,15 @@ import type {
 } from "../types";
 
 interface AiprDesktopApi {
+  validateDelivery(): Promise<unknown>;
+  backupData(): Promise<unknown>;
+  restoreData(): Promise<unknown>;
+  exportDiagnostics(): Promise<unknown>;
+  saveContactCorrection(payload:Record<string,string>):Promise<unknown>;
+  saveReviewNote(payload: {creatorId:string;note:string;disposition:string}): Promise<unknown>;
+  saveJevSettings(payload: { apiKey: string; model?: string }): Promise<unknown>;
+  testJevConnection(): Promise<{cancelled?:boolean;ok?:boolean;message?:string}>;
+  openJevConsole(): Promise<unknown>;
   getBootstrap(): Promise<Bootstrap>;
   getRealtimeCreatorFlow(): Promise<RealtimeFlow>;
   getPlatformReadiness(): Promise<PlatformReadiness>;
@@ -27,17 +36,27 @@ interface AiprDesktopApi {
   selectTask(taskId: string): Promise<unknown>;
   saveTask(task: Partial<Task>): Promise<Task>;
   importFile(): Promise<unknown>;
+  understandBrief(text:string):Promise<{fields:Record<string,unknown>;sources:Record<string,string>;unresolved:string[];provider:string;model:string}>;
   importBrief(): Promise<unknown>;
   importDelivery(): Promise<unknown>;
   loadDeliveryPath(target: string): Promise<unknown>;
   launchBrowsers(): Promise<unknown>;
   layoutEmbeddedShop(payload: unknown): Promise<unknown>;
-  hideEmbeddedShops(): Promise<unknown>;
+  hideEmbeddedShops(payload?: {epoch:number}): Promise<unknown>;
   controlEmbeddedShop(payload: unknown): Promise<unknown>;
   probeLogin(): Promise<unknown>;
   startCollection(task: Partial<Task>, strategy?: unknown): Promise<unknown>;
   startWorker(task: Partial<Task>): Promise<unknown>;
+  endCollection(): Promise<unknown>;
   pauseWorker(): Promise<unknown>;
+  repairSavedWechat(scope?:"current"|"history"): Promise<{corrected:number;errors:unknown[]}>;
+  verifySavedContacts(): Promise<{ok?:boolean;error?:string}>;
+  applySavedAudit(): Promise<{ok?:boolean;error?:string}>;
+  auditSavedList(): Promise<{ok?:boolean;error?:string}>;
+  reviewSaved(): Promise<{ok?:boolean;error?:string}>;
+  openSavedReview(): Promise<unknown>;
+  importBatchBaseline(): Promise<{canceled?:boolean;count?:number}>;
+  deliverCurrent(task: Partial<Task>): Promise<unknown>;
   exportOriginal(task: Partial<Task>): Promise<unknown>;
   openPath(target: string): Promise<unknown>;
   getDeliveryCenter(target?: string): Promise<DeliveryCenter>;
@@ -96,7 +115,7 @@ export const controlEmbeddedShop = (payload: unknown) =>
   api().controlEmbeddedShop(payload);
 export const layoutEmbeddedShop = (payload: unknown) =>
   api().layoutEmbeddedShop(payload);
-export const hideEmbeddedShops = () => api().hideEmbeddedShops();
+export const hideEmbeddedShops = (payload?: {epoch:number}) => api().hideEmbeddedShops(payload);
 
 // ---------- 采集 ----------
 
@@ -163,3 +182,37 @@ export function onShopBrowserEvent(
   if (!isElectron()) return () => {};
   return api().onShopBrowserEvent(listener);
 }
+
+export const openJevConsole = () => api().openJevConsole();
+export const saveJevSettings = (payload: { apiKey: string; model?: string }) => api().saveJevSettings(payload);
+
+export const deliverCurrent = (task: Partial<Task>) => api().deliverCurrent(task);
+
+export const endCollection = () => api().endCollection();
+
+export const saveReviewNote = (payload: {creatorId:string;note:string;disposition:string}) => api().saveReviewNote(payload);
+
+export const backupData = () => api().backupData();
+export const restoreData = () => api().restoreData();
+export const exportDiagnostics = () => api().exportDiagnostics();
+
+export const validateDelivery = () => api().validateDelivery();
+
+export const saveContactCorrection=(payload:Record<string,string>)=>api().saveContactCorrection(payload);
+
+export const testJevConnection = () => api().testJevConnection();
+
+export const reviewSaved = () => api().reviewSaved();
+export const openSavedReview = () => api().openSavedReview();
+
+export const verifySavedContacts = () => api().verifySavedContacts();
+
+export const repairSavedWechat = (scope:"current"|"history"="current") => api().repairSavedWechat(scope);
+
+export const understandBrief=(text:string)=>api().understandBrief(text);
+
+export const importBatchBaseline=()=>api().importBatchBaseline();
+
+export const auditSavedList = () => api().auditSavedList();
+
+export const applySavedAudit=()=>api().applySavedAudit();

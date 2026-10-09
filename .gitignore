@@ -35,3 +35,26 @@ app/frontend/node_modules/
 # 测试产物
 coverage/
 .vitest/
+
+# 发布资产由 GitHub Releases 管理，不提交内置运行时和安装包
+app/runtime/*/python/
+app/runtime/*/python-staging/
+*.exe
+*.msi
+app/dist/
+app/frontend/dist/
+
+# 隔离原生验收构建不进入源码发布
+app/release-native-qa*/
+
+# 本机安装记录、历史构建备份与生产业务资料不进入源码仓库
+backups/
+INSTALLATION-STATUS.json
+brand-tasks/
+品牌任务/
+batches/
+contact-corrections.json
+creator-library.json
+runtime-metrics.json
+credential-vault.json
+startup-diagnostics.jsonl

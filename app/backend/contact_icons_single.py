@@ -1,4 +1,5 @@
 from __future__ import annotations
+from contact_shop_cooldown import cooldown_path, shop_cooldown_until
 
 import argparse
 import fcntl
@@ -10,7 +11,7 @@ import re
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
@@ -107,6 +108,16 @@ def contact_items(page) -> list[str]:
     )
 
 
+def unresolved_contact_icons(page, candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    visible = parse_contact_items(contact_items(page))
+    known = {channel: visible[channel] or candidate.get(f"buyin_contact_{channel}") or candidate.get(f"cart_contact_{channel}") for channel in ("phone", "wechat", "email")}
+    def missing(icon):
+        text = str(icon.get("text") or "")
+        channel = "wechat" if "微信" in text else "phone" if "手机" in text else "email" if "邮箱" in text else ""
+        return not channel or not known[channel]
+    return [icon for icon in contact_icons(page) if missing(icon)]
+
+
 def contact_icons(page) -> list[dict[str, Any]]:
     return page.evaluate(
         """() => Array.from(document.querySelectorAll('.index-module__contact-item___ny9bn')).map((item, idx) => {
@@ -188,7 +199,7 @@ def should_stop_contact_batch(candidate: dict[str, Any]) -> bool:
     return candidate.get("ui_contact_probe_status") == "daily_quota_exhausted"
 
 
-def wait_for_global_contact_slot(page, output_dir: Path, interval_ms: int) -> int:
+def wait_for_global_contact_slot(page, output_dir: Path, interval_ms: int, shop: str = '') -> int:
     """Serialize reveal requests across A/B and add human-like jitter.
 
     The contact endpoint applies a merchant-level throttle, so two individually
@@ -197,7 +208,7 @@ def wait_for_global_contact_slot(page, output_dir: Path, interval_ms: int) -> in
     """
     lock_path = output_dir / ".contact_reveal.lock"
     state_path = output_dir / ".contact_reveal.timestamp"
-    cooldown_path = output_dir / ".contact_rate_limit_until"
+    cooldown_file = cooldown_path(output_dir, shop)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
@@ -207,9 +218,13 @@ def wait_for_global_contact_slot(page, output_dir: Path, interval_ms: int) -> in
             except (OSError, ValueError):
                 last_reveal = 0.0
             try:
-                cooldown_until = float(cooldown_path.read_text(encoding="utf-8").strip())
+                cooldown_until = float(cooldown_file.read_text(encoding="utf-8").strip())
             except (OSError, ValueError):
                 cooldown_until = 0.0
+            if shop in ("A", "B"):
+                cooldown_until = shop_cooldown_until(output_dir, shop)
+            if cooldown_until > time.time():
+                raise RuntimeError(f"contact_cooldown_active:{cooldown_until}")
             jitter_ms = random.randint(1800, 5200)
             next_allowed = max(last_reveal + interval_ms / 1000, cooldown_until)
             remaining_ms = max(0, int((next_allowed - time.time()) * 1000))
@@ -229,16 +244,16 @@ def wait_for_global_contact_slot(page, output_dir: Path, interval_ms: int) -> in
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
-def mark_global_rate_limit(output_dir: Path, cooldown_ms: int) -> float:
-    cooldown_path = output_dir / ".contact_rate_limit_until"
+def mark_global_rate_limit(output_dir: Path, cooldown_ms: int, shop: str = '') -> float:
+    cooldown_file = cooldown_path(output_dir, shop)
     try:
-        previous = float(cooldown_path.read_text(encoding="utf-8").strip())
+        previous = float(cooldown_file.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         previous = 0.0
     until = max(previous, time.time() + max(0, cooldown_ms) / 1000)
-    temporary = cooldown_path.with_suffix(f".{os.getpid()}.tmp")
+    temporary = cooldown_file.with_suffix(f".{os.getpid()}.tmp")
     temporary.write_text(str(until), encoding="utf-8")
-    temporary.replace(cooldown_path)
+    temporary.replace(cooldown_file)
     return until
 
 
@@ -288,16 +303,29 @@ def relevant_network_diagnostics(responses: list[Any]) -> list[dict[str, Any]]:
 def run_candidate(
     page, candidate: dict[str, Any], delay_ms: int, output_dir: Path = OUT_DIR,
     reveal_interval_ms: int = 12000,
+    stop_if_duplicate: Callable[[dict[str, Any]], bool] | None = None,
+    primary_contact_only: bool = False,
 ) -> dict[str, Any]:
     current = dict(candidate)
+    current.pop("ui_contact_remaining_skipped_reason", None)
     current["ui_contact_probe_at"] = datetime.now().isoformat(timespec="seconds")
     url = str(current.get("buyin_profile_url") or current.get("精选联盟主页") or "").strip()
     if not url:
         current["ui_contact_probe_status"] = "missing_profile_url"
         return current
 
-    page.goto(url, wait_until="domcontentloaded", timeout=45000)
-    page.wait_for_timeout(max(3000, delay_ms))
+    # Evidence review already loaded this exact creator in the same shop page.
+    # Reuse it rather than requesting the entire profile a second time.
+    reuse_profile = current.get("content_evidence_reviewed") is True and page.url == url
+    if reuse_profile:
+        body = compact(page.locator("body").inner_text(timeout=8000))
+        reuse_profile = profile_content_ready(body) and not any(
+            marker in body for marker in ("当前环境存在风险", "请求过于频繁", "验证码", "安全验证")
+        )
+    if not reuse_profile:
+        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_timeout(max(3000, delay_ms))
+    current["ui_contact_profile_reused"] = reuse_profile
     try:
         page.wait_for_function(
             """() => {
@@ -305,15 +333,19 @@ def run_candidate(
               return ['达人自主披露联系方式', '添加达人库', '已加达人库', '粉丝数', '带货口碑']
                 .some(marker => text.includes(marker));
             }""",
-            timeout=12000,
+            timeout=45000,
         )
     except PlaywrightTimeoutError:
         pass
     current["ui_contact_final_url"] = page.url
     current["ui_contact_page_title"] = compact(page.title())
-    current["ui_contact_page_excerpt"] = compact(page.locator("body").inner_text(timeout=8000))[:500]
-    if not profile_content_ready(current["ui_contact_page_excerpt"]):
-        current["ui_contact_probe_status"] = "profile_not_ready"
+    profile_body = compact(page.locator("body").inner_text(timeout=8000))
+    current["ui_contact_page_excerpt"] = profile_body[:500]
+    if not profile_content_ready(profile_body):
+        if "douyinec.com" in page.url or ("立即入驻" in profile_body and "登录" in profile_body):
+            current["ui_contact_probe_status"] = "login_required"
+        else:
+            current["ui_contact_probe_status"] = "profile_not_ready"
         return current
 
     add_clicked = page.evaluate(
@@ -335,7 +367,9 @@ def run_candidate(
         current["ui_add_library_status"] = "not_found"
 
     before_items = contact_items(page)
-    icons = contact_icons(page)
+    icons = unresolved_contact_icons(page, current)
+    if primary_contact_only:
+        icons.sort(key=lambda icon: 0 if "微信" in str(icon.get("text") or "") else 1)
     clicked = 0
     confirmations: list[dict[str, Any]] = []
     observed_responses: list[Any] = []
@@ -343,12 +377,44 @@ def run_candidate(
     page.on("response", response_listener)
     try:
         for icon in icons:
-            if parse_contact_items(contact_items(page))["contact"]:
-                break
+            if primary_contact_only:
+                from creator_delivery_contract import contact_identity_values
+                partial = parse_contact_items(contact_items(page))
+                primary = {**current, **{f"buyin_contact_{channel}": partial[channel]
+                           for channel in ("wechat", "phone", "email") if partial[channel]}}
+                has_wechat = bool(contact_identity_values({"buyin_contact_wechat": primary.get("buyin_contact_wechat")}))
+                wechat_available = any("微信" in str(item.get("text") or "") for item in icons)
+                if contact_identity_values(primary) and (has_wechat or clicked > 0 or not wechat_available):
+                    current["ui_contact_remaining_skipped_reason"] = "primary_ready_supplement_pending"
+                    break
+            # Only a proven strict-list collision may skip remaining channels.
+            # Unique creators still receive the full phone/WeChat/email pass.
+            if stop_if_duplicate is not None:
+                partial = parse_contact_items(contact_items(page))
+                probe = dict(current)
+                for channel in ("wechat", "phone", "email"):
+                    if partial[channel]:
+                        probe[f"buyin_contact_{channel}"] = partial[channel]
+                        probe[f"cart_contact_{channel}"] = partial[channel]
+                try:
+                    duplicate = stop_if_duplicate(probe)
+                except Exception:
+                    duplicate = False  # An unavailable audit must not skip evidence.
+                if duplicate:
+                    current["ui_contact_remaining_skipped_reason"] = "strict_contact_duplicate"
+                    break
+            # Other channels remain eligible after the first plaintext reveal.
+            remaining = {item["idx"] for item in unresolved_contact_icons(page, current)}
+            if icon["idx"] not in remaining:
+                continue
             current["ui_contact_global_wait_ms"] = wait_for_global_contact_slot(
-                page, output_dir, max(8000, reveal_interval_ms)
+                page, output_dir, max(8000, reveal_interval_ms), str(current.get("contact_shop") or "")
             )
-            button = page.locator('.index-module__contact-item-btn___tZUqf').nth(icon["idx"])
+            # idx belongs to contact rows, including rows without a reveal button.
+            # Indexing the shorter button list can select another contact or hang.
+            button = page.locator('.index-module__contact-item___ny9bn').nth(icon["idx"]).locator(
+                '.index-module__contact-item-btn___tZUqf'
+            )
             for event in ("pointerdown", "mousedown", "pointerup", "mouseup", "click"):
                 button.dispatch_event(event)
             clicked += 1
@@ -381,6 +447,16 @@ def run_candidate(
         current["ui_contact_confirmation_status"] = confirmations[-1]["status"]
         current["ui_contact_daily_quota_remaining"] = confirmations[-1].get("remaining")
 
+    # A partial reveal must never erase a previously saved channel.
+    for channel in ("wechat", "phone", "email"):
+        parsed[channel] = parsed[channel] or current.get(f"buyin_contact_{channel}") or current.get(f"cart_contact_{channel}") or ""
+    parsed["contact"] = "；".join(f"{label}:{parsed[channel]}" for channel, label in (("wechat", "微信"), ("phone", "手机"), ("email", "邮箱")) if parsed[channel])
+    blocked = "daily_quota_exhausted" if any(item.get("status") == "daily_quota_exhausted" for item in confirmations) or daily_quota_exhausted(message) else "rate_limited" if "请求过于频繁" in message or "稍后再试" in message else "category_not_matched" if "主推类目不属于店铺类目" in message or "本周仅支持" in message else ""
+    current["ui_contact_channels_checked_at"] = datetime.now().isoformat(timespec="seconds")
+    current["ui_contact_channels_status"] = blocked or ("partial" if unresolved_contact_icons(page, current) else "complete")
+    current["ui_contact_remaining_masked_rows"] = [item.get("text", "") for item in unresolved_contact_icons(page, current)]
+    if not blocked and current.get("ui_contact_remaining_skipped_reason") == "primary_ready_supplement_pending":
+        current["ui_contact_channels_status"] = "primary_ready_supplement_pending"
     if parsed["contact"]:
         current["ui_contact_probe_status"] = "revealed"
         current["cart_contact_text"] = parsed["contact"]
@@ -408,7 +484,7 @@ def run_candidate(
         current["ui_contact_probe_status"] = "rate_limited"
         current["cart_contact_probe_status"] = "rate_limited"
         current["buyin_contact_probe_status"] = "rate_limited"
-        current["ui_contact_rate_limit_until"] = mark_global_rate_limit(output_dir, 600000)
+        current["ui_contact_rate_limit_until"] = mark_global_rate_limit(output_dir, 600000, str(current.get("contact_shop") or ""))
     elif clicked:
         current["ui_contact_probe_status"] = "clicked_not_revealed"
         current["cart_contact_probe_status"] = "clicked_not_revealed"
@@ -417,6 +493,10 @@ def run_candidate(
         current["ui_contact_probe_status"] = "no_contact_icon"
         current["cart_contact_probe_status"] = "no_contact_icon"
         current["buyin_contact_probe_status"] = "no_contact_icon"
+    if blocked:
+        current["ui_contact_probe_status"] = blocked
+        if blocked == "rate_limited":
+            current["ui_contact_rate_limit_until"] = mark_global_rate_limit(output_dir, 600000, str(current.get("contact_shop") or ""))
     return current
 
 
@@ -431,14 +511,28 @@ def has_plain(candidate: dict[str, Any]) -> bool:
     )
 
 
-def select_contact_targets(candidates: list[dict[str, Any]], shop: str, limit: int) -> list[dict[str, Any]]:
+def saved_contact_channels_complete(candidate: dict[str, Any]) -> bool:
+    status = candidate.get("ui_contact_channels_status")
+    if status == "category_not_matched":
+        return True
+    if status != "complete":
+        return False
+    for text in candidate.get("ui_contact_remaining_masked_rows", []):
+        channel = "wechat" if "微信" in str(text) else "phone" if "手机" in str(text) else "email" if "邮箱" in str(text) else ""
+        if not channel or not (candidate.get(f"buyin_contact_{channel}") or candidate.get(f"cart_contact_{channel}")):
+            return False
+    return True
+
+
+def select_contact_targets(candidates: list[dict[str, Any]], shop: str, limit: int, complete_channels: bool = False) -> list[dict[str, Any]]:
     selected = [
         candidate
         for candidate in candidates
         if candidate.get("content_evidence_reviewed") is True
         and candidate.get("precontact_qualified") is True
-        and not has_plain(candidate)
-        and not terminal_contact_failure(candidate)
+        and (complete_channels or not has_plain(candidate))
+        and not (complete_channels and saved_contact_channels_complete(candidate))
+        and (complete_channels or not terminal_contact_failure(candidate))
         and (
             shop == "all"
             or compact(candidate.get("contact_shop") or candidate.get("lip_shop") or candidate.get("shop")) in ("", shop)
@@ -453,6 +547,7 @@ def select_contact_targets(candidates: list[dict[str, Any]], shop: str, limit: i
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--complete-contact-channels", action="store_true")
     parser.add_argument("--input", default="")
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--shop", choices=["A", "B", "all"], required=True)
@@ -464,7 +559,7 @@ def main() -> None:
     input_path = Path(args.input) if args.input else latest("*contact*queue*.json")
     payload = json.loads(input_path.read_text(encoding="utf-8"))
     candidates = [item for item in payload.get("candidates") or [] if isinstance(item, dict)]
-    candidates = select_contact_targets(candidates, args.shop, args.limit)
+    candidates = select_contact_targets(candidates, args.shop, args.limit, args.complete_contact_channels)
     max_count = len(candidates)
 
     processed: list[dict[str, Any]] = []
@@ -504,7 +599,7 @@ def main() -> None:
                 current["ui_contact_probe_status"] = "limit_not_reached_this_run"
                 processed.append(current)
                 continue
-            if has_plain(current):
+            if has_plain(current) and not args.complete_contact_channels:
                 current["ui_contact_probe_status"] = "already_has_plain"
                 processed.append(current)
                 continue
@@ -513,19 +608,27 @@ def main() -> None:
                     page, current, max(3000, args.delay_ms), OUT_DIR,
                     max(8000, args.reveal_interval_ms),
                 )
+                if current.get("ui_contact_probe_status") == "login_required":
+                    processed.append(current)
+                    processed.extend(dict(row) for row in candidates[index + 1:])
+                    save_checkpoint()
+                    print(json.dumps({"status": "contact_login_required", "shop": args.shop, "message": "店铺页面返回登录入口，已保存进度并停止该店铺"}, ensure_ascii=False), flush=True)
+                    break
                 if current.get("ui_contact_probe_status") == "rate_limited":
                     # A platform frequency-control response is a stop signal, not
                     # an invitation to retry inside a long-running worker.  Save
                     # the exact checkpoint and let the outer scheduler choose a
                     # later, single low-frequency resume window.
-                    retry_until = mark_global_rate_limit(OUT_DIR, 1200000)
+                    retry_until = mark_global_rate_limit(OUT_DIR, 1200000, args.shop)
                     print(json.dumps({
                         "status": "contact_platform_paused",
+                        "message": "rate_limited：平台频率限制，保存进度后等待冷却",
                         "shop": args.shop,
                         "creator": current.get("nickname") or "",
                         "retry_at_epoch": retry_until,
                     }, ensure_ascii=False), flush=True)
-                    save_checkpoint(current)
+                    processed.append(current)
+                    save_checkpoint()
                     # 立即结束本轮。若继续处理后续达人，每个都会在
                     # wait_for_global_contact_slot 里阻塞等待冷却结束，
                     # 表现为「进程活着但零输出」的假死状态。
@@ -539,6 +642,14 @@ def main() -> None:
             except Exception as exc:
                 current["ui_contact_probe_status"] = "exception"
                 current["ui_contact_error"] = str(exc)[:300]
+                if str(exc).startswith("contact_cooldown_active:"):
+                    current["ui_contact_probe_status"] = "rate_limited"
+                    current["ui_contact_channels_status"] = "rate_limited"
+                    processed.append(current)
+                    processed.extend(dict(row) for row in candidates[index + 1:])
+                    print(json.dumps({"status": "contact_platform_paused", "message": "rate_limited：当前店铺冷却中，已保存待处理名单", "shop": args.shop}, ensure_ascii=False), flush=True)
+                    save_checkpoint()
+                    break
             processed.append(current)
             print(json.dumps({
                 "status": "contact_revealed" if has_plain(current) else "contact_progress",
