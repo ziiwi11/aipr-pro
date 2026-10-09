@@ -1,0 +1,5 @@
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');const {repairRestoredTasks}=require('./restore-path-repair.cjs');
+test('migration repairs only restored tasks with the known prefix and an existing destination',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'qianxun-repair-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));const correct=path.join(root,'恢复-123/brand-tasks/task/final.json');fs.mkdirSync(path.dirname(correct),{recursive:true});fs.writeFileSync(correct,'{}');const broken=path.join(root,'恢复-123/brand-tasks/恢复-123/brand-tasks/task/final.json');
+ const result=repairRestoredTasks({currentTaskId:'original',tasks:[{id:'original',deliveryPath:broken},{id:'task-restored',deliveryPath:broken},{id:'missing-restored',deliveryPath:broken+'-missing'}]});assert.equal(result.repaired,1);assert.equal(result.state.currentTaskId,'original');assert.equal(result.state.tasks[0].deliveryPath,broken);assert.equal(result.state.tasks[1].deliveryPath,correct);assert.equal(result.state.tasks[2].deliveryPath,broken+'-missing');
+});

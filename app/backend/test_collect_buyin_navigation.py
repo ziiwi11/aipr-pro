@@ -20,6 +20,70 @@ from collect_buyin_creators_cdp import (
 
 
 class CollectBuyinNavigationTest(unittest.TestCase):
+    def test_unconfirmed_filter_preserves_checkpoint_and_blocks_incomplete_recovery(self):
+        import json, tempfile
+        from unittest.mock import patch
+        import collect_buyin_creators_cdp as collector
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); strategy=root/'strategy.json'
+            strategy.write_text(json.dumps({"sourceDiscoveryMode":"structured_browse", "category":"个护家清", "targetCount":20, "activeShops":["A"]}))
+            events=[]
+            with patch('sys.argv', ['collector','--strategy',str(strategy),'--out-dir',str(root/'out')]), patch.object(collector,'endpoint_is_explicitly_logged_out',return_value=False), patch.object(collector,'collect_shop_browse',side_effect=RuntimeError('buyin_sale_type_not_confirmed:视频达人')), patch.object(collector,'emit',side_effect=events.append):
+                with self.assertRaises(SystemExit) as stopped:
+                    collector.main()
+            self.assertEqual(stopped.exception.code,12)
+            statuses=[event['status'] for event in events]
+            self.assertIn('collection_checkpoint_saved',statuses)
+            self.assertIn('collection_filter_blocked',statuses)
+            self.assertNotIn('collection_incomplete',statuses)
+
+    def test_sale_type_click_targets_radio_and_requires_checked_state(self):
+        from unittest.mock import Mock, patch
+        import collect_buyin_creators_cdp as collector
+        page=Mock(); radio=page.get_by_role.return_value.first
+        radio.is_checked.return_value=True
+        with patch.object(collector,"click_text",return_value=True):
+            collector.apply_strategy_filters(page,{"contentType":"短视频","category":""})
+        page.get_by_role.assert_called_with("radio",name="视频达人",exact=True)
+        radio.click.assert_called_once_with(timeout=3000)
+        radio.is_checked.return_value=False;radio.get_attribute.return_value="false"
+        with patch.object(collector,"click_text",return_value=True), self.assertRaisesRegex(RuntimeError,"sale_type_not_confirmed"):
+            collector.apply_strategy_filters(page,{"contentType":"短视频","category":""})
+
+    def test_multiple_levels_do_not_leave_single_platform_level(self):
+        from unittest.mock import patch
+        import collect_buyin_creators_cdp as collector
+        with patch.object(collector, "click_text", return_value=True) as click:
+            collector.apply_strategy_filters(object(), {"creatorLevels": [1, 2, 3, 4]})
+        self.assertFalse(any(str(call.args[1]).startswith("LV") for call in click.call_args_list))
+        with patch.object(collector, "click_text", return_value=True) as click:
+            collector.apply_strategy_filters(object(), {"creatorLevels": [2]})
+        self.assertIn(unittest.mock.call(unittest.mock.ANY, "LV2"), click.call_args_list)
+
+    def test_restore_reestablishes_same_shop_session_after_search_timeout(self):
+        from unittest.mock import MagicMock, patch
+        from playwright.sync_api import TimeoutError
+        import collect_buyin_creators_cdp as collector
+        page = MagicMock()
+        page.locator.return_value.first.wait_for.side_effect = [TimeoutError("redirected"), None]
+        with patch.object(collector, "assert_safe"), patch.object(collector, "bootstrap_buyin_page") as bootstrap, \
+             patch.object(collector, "click_text"), patch.object(collector, "apply_strategy_filters"), \
+             patch.object(collector, "trigger_structured_browse"):
+            collector.restore_structured_browse_page(page, {})
+        bootstrap.assert_called_once_with(page.context, preferred_page=page)
+
+    def test_restore_does_not_reenter_when_platform_risk_is_present(self):
+        from unittest.mock import MagicMock, patch
+        from playwright.sync_api import TimeoutError
+        import collect_buyin_creators_cdp as collector
+        page = MagicMock()
+        page.locator.return_value.first.wait_for.side_effect = TimeoutError("missing")
+        with patch.object(collector, "assert_safe", side_effect=RuntimeError("platform_paused:风险")), \
+             patch.object(collector, "bootstrap_buyin_page") as bootstrap:
+            with self.assertRaisesRegex(RuntimeError, "platform_paused"):
+                collector.restore_structured_browse_page(page, {})
+        bootstrap.assert_not_called()
+
     def test_response_json_cancellation_during_shutdown_is_ignored(self):
         class FakeRequest:
             post_data_json = {"query": "唇蜜", "page": 1}

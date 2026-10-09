@@ -8,6 +8,7 @@
 // ---------- 任务 ----------
 
 export type TaskStatus =
+  | "ended"
   | "idle"
   | "running"
   | "paused"
@@ -17,6 +18,7 @@ export type TaskStatus =
   | "unknown";
 
 export interface ShopState {
+  checkedAt?: string;
   label: string;
   port: string;
   status: string;
@@ -54,6 +56,7 @@ export interface CollectionStrategy {
 }
 
 export interface Task {
+  brandRevisions?: {version:number;createdAt:string;fingerprint:string;config:Record<string,unknown>}[];
   id: string;
   name: string;
   targetCount: number;
@@ -70,14 +73,19 @@ export interface Task {
   deliveryPath: string;
   queuePath: string;
   originalWorkbookPath: string;
+  originalExport?: {path:string;deliveryPath:string;sourceWorkbookPath:string;createdAt:string};
   shops?: Record<string, ShopState>;
   collectionStrategy?: CollectionStrategy;
   updatedAt?: string;
+  endedAt?: string;
+  endedReason?: string;
 }
 
 // ---------- 达人 ----------
 
 export interface Creator {
+  canonicalTaskCreatorId?: string;
+  contactCorrectionCreatorId?: string;
   id?: string;
   identity?: string;
   nickname: string;
@@ -91,6 +99,10 @@ export interface Creator {
   category?: string;
   monthlySalesLow?: number;
   monthlySalesHigh?: number;
+  monthlySalesLowerBound?: number;
+  monthlySalesDisplay?: string;
+  videoCount30d?: number;
+  mainSaleType?: string;
   price?: number;
   wechat?: string;
   phone?: string;
@@ -214,6 +226,7 @@ export interface RoiReport {
 }
 
 export interface DeliveryCenter {
+  validation?: {ok:boolean;stale?:boolean;checkedAt:string;rowCount:number;queueCount:number;errors:string[];scope?:string;files:{key:string;sha256:string}[]} | null;
   available: boolean;
   artifacts: DeliveryArtifacts;
   metrics?: Record<string, number>;
@@ -243,6 +256,8 @@ export interface OutreachState {
 // ---------- 运行历史 ----------
 
 export interface RunHistoryEntry {
+  recordedAt?: string;
+  message?: string;
   id?: string;
   startedAt?: string;
   finishedAt?: string;
@@ -255,8 +270,21 @@ export interface RunHistoryEntry {
 // ---------- Bootstrap ----------
 
 export interface Bootstrap {
+  savedWechatRepairCount?:number;
+  historicalWechatRepairCount?:number;
+  savedEvidenceReview?: {contact_review_status?:string;status:string;remaining_count?:number;updated_at:string;records:{identity:string;screenshots:string[];content_status:string;manual_review_required:boolean;contact_verification:{reachability:string;channels:Record<string,string>}}[]};
+  contactCorrections?: {creatorId:string;before:Record<string,string>;after:Record<string,string>;source:string;reason:string;revision:number;recordedAt:string}[];
+  contactRevisionPending?:boolean;
+  runtimeMetrics?: {available:boolean;scope:string;runs?:number;elapsedMs?:number;effectiveMs?:number;cooldownMs?:number;unknownMs?:number;newCreators?:number;interruptions?:number;netPerHour?:number|null};
+  appVersion?: string;
+  maintenance?: {busy:boolean;message:string;files:number;bytes:number;lastBackup:string};
+  reviewRecords?: {creatorId:string;note:string;disposition:string;recordedAt:string;revision:number;admissionChanged:boolean}[];
+  creatorLibrary?: { creators: Creator[]; batches: { id: string; name: string; count: number; status?: string; deliveryPath?:string; baselinePath?:string }[] };
+  qwenStatus?: {provider:string;configured:boolean;model:string;purpose:string;credentialChanged:boolean};
+  jevStatus?: { connectionTest?: {ok:boolean;message:string;checkedAt:string;model?:string;elapsedMs:number;usage?:{input_tokens?:number;output_tokens?:number}}; credentialProtection?: string; enabled: boolean; configured: boolean; decisionMode: boolean; model?: string; usage?: { calls: number; inputTokens: number | null; outputTokens: number | null; inputCoverage: number; outputCoverage: number; firstAt: string | null; lastAt: string | null; lastModel: string | null; invalidRows: number; readError: boolean; attempts?: number; failures?: number; retries?: number; averageLatencyMs?: number | null; writeError?: boolean; accountStatus?: { recordedAt: string; outcome: string; httpStatus: number | null } | null; byTask?: Record<string, {attempts:number;calls:number;failures:number;retries:number;inputTokens:number|null;outputTokens:number|null}>; byDate?: Record<string, {attempts:number;calls:number;failures:number;retries:number;inputTokens:number|null;outputTokens:number|null}>; balance: null; billedAmount: null } };
   task: Task;
   tasks: Task[];
+  currentBatch?:{id:string;baselineCount:number;newCount:number;baselinePath:string}|null;
   creators: Creator[];
   candidateCreators: Creator[];
   realtimeFlow: RealtimeFlow;

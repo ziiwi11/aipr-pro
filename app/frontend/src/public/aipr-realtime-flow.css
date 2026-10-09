@@ -1,9 +1,11 @@
 .aipr-realtime-flow-panel {
-  position: fixed;
-  z-index: 9000;
-  right: 24px;
-  bottom: 22px;
-  width: min(680px, calc(100vw - 48px));
+  position: relative;
+  z-index: auto;
+  right: auto;
+  bottom: auto;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 20px;
   color: #17211b;
   background: rgba(250, 252, 250, .96);
   border: 1px solid rgba(67, 94, 76, .18);
@@ -27,6 +29,6 @@
 .aipr-flow-metric.formal { background: #e5f4eb; color: #0d6c3b; }
 .aipr-flow-rule { margin-top: 9px; font-size: 10px; line-height: 1.45; color: #6a756e; }
 @media (max-width: 760px) {
-  .aipr-realtime-flow-panel { right: 12px; bottom: 12px; width: calc(100vw - 24px); }
+  .aipr-realtime-flow-panel { width: 100%; }
   .aipr-flow-metrics { grid-template-columns: repeat(3, 1fr); }
 }

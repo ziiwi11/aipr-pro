@@ -1,3 +1,4 @@
+import {openTaskWizard} from "./task-wizard";
 /**
  * 应用外壳：侧边栏导航 + 工作区
  *
@@ -23,25 +24,29 @@ export const PAGES: PageDef[] = [
   { id: "dashboard", label: "任务总览", rootClass: "dashboard-grid" },
   { id: "brand-card", label: "品牌手卡", rootClass: "settings-layout" },
   { id: "creators", label: "达人优选", rootClass: "panel list-panel" },
-  { id: "contacts", label: "联系方式", rootClass: "contact-layout" },
-  { id: "outreach", label: "AI 建联", rootClass: "outreach-page" },
-  { id: "delivery", label: "交付中心", rootClass: "delivery-center-page" },
+  { id: "outreach", label: "联系与交付", rootClass: "outreach-page" },
+  { id: "models", label: "分析模型", rootClass: "settings-page" },
   { id: "settings", label: "系统设置", rootClass: "settings-page" },
   { id: "browser", label: "抖店浏览器", rootClass: "shop-browser-page full" },
 ];
 
 /** 当前页面（跨重渲染保持） */
 let currentPageId = "auto-collect";
+let managementOpen=false;
 
 export function getCurrentPage(): string {
   return currentPageId;
 }
 
 export function setCurrentPage(id: string): void {
-  if (PAGES.some((p) => p.id === id)) currentPageId = id;
+  const destination = ["contacts", "delivery"].includes(id) ? "outreach" : id;
+  if (PAGES.some((p) => p.id === destination)) currentPageId = destination;
 }
 
 export interface ShellHandlers {
+  onCreateTask?(name: string, targetCount: number, strategy?: import("../types").CollectionStrategy): void | Promise<void>;
+  onReadBrief?():Promise<{text?:string}|null>;
+  onUnderstandBrief?:import("./task-wizard").TaskWizardHandlers["onUnderstandBrief"];
   onNavigate(pageId: string): void;
   onSelectTask(taskId: string): void;
   onRefresh(): void;
@@ -52,15 +57,15 @@ export interface ShellHandlers {
 
 function brandLockup(): HTMLElement {
   return h("div", { class: "brand-lockup" }, [
-    h("span", { class: "brand-mark", text: "A" }),
+    h("span", { class: "brand-mark", text: "千" }),
     h("div", { class: "brand-text" }, [
-      h("strong", { text: "AIPR Pro" }),
+      h("strong", { text: "千寻" }),
       h("span", { text: "达人运营系统" }),
     ]),
   ]);
 }
 
-function taskSwitcher(task: Task, handlers: ShellHandlers): HTMLElement {
+function taskSwitcher(task: Task, handlers: ShellHandlers, tasks: Task[]): HTMLElement {
   const btn = h("button", {
     class: "task-switch active",
     type: "button",
@@ -68,22 +73,30 @@ function taskSwitcher(task: Task, handlers: ShellHandlers): HTMLElement {
   }, [
     h("span", { class: "task-switch-name", text: task.name || "未命名任务" }),
     h("span", { class: "task-switch-meta",
-      text: `切换任务 · ${fmtNum(task.targetCount)} 人` }),
+      text: `刷新当前任务 · 目标 ${fmtNum(task.targetCount)} 人` }),
   ]);
-  return h("div", { class: "task-switch-wrap" }, [btn]);
+  const selector = h("select", {
+    "aria-label": "选择品牌任务",
+    style: "width:100%;margin-top:8px;padding:8px;",
+    onchange: (event: Event) => handlers.onSelectTask((event.target as HTMLSelectElement).value),
+  }, tasks.map(item => h("option", { value: item.id, selected: item.id === task.id, text: item.name || item.id })));
+  const create = h("button", {type:"button",text:"新建品牌任务",onclick:()=>openTaskWizard(handlers)});
+  return h("div", { class: "task-switch-wrap" }, [btn, selector, create]);
 }
 
 function navList(state: Bootstrap, handlers: ShellHandlers): HTMLElement {
   // 联系方式页显示正式名单数量角标（对齐原版）
   const contactCount = (state.creators ?? []).length;
   const nav = h("nav", {});
+  const advanced=h("details",{class:"nav-more"},[h("summary",{text:"模型与系统管理"})]);
+  const advancedPages=new Set(["models","settings","browser"]);
   for (const page of PAGES) {
     const active = page.id === currentPageId;
     const children: (Node | string)[] = [h("span", { text: page.label })];
-    if (page.id === "contacts" && contactCount > 0) {
+    if (page.id === "outreach" && contactCount > 0) {
       children.push(h("span", { class: "nav-badge", text: String(contactCount) }));
     }
-    nav.append(
+    (advancedPages.has(page.id)?advanced:nav).append(
       h("button", {
         class: active ? "active" : "",
         type: "button",
@@ -91,6 +104,9 @@ function navList(state: Bootstrap, handlers: ShellHandlers): HTMLElement {
       }, children),
     );
   }
+  if(managementOpen||advancedPages.has(currentPageId))advanced.setAttribute("open","");
+  advanced.addEventListener("toggle",()=>{managementOpen=(advanced as HTMLDetailsElement).open;});
+  nav.append(advanced);
   return nav;
 }
 
@@ -101,14 +117,14 @@ function sidebarFoot(state: Bootstrap): HTMLElement {
       h("span", { class: `dot${ready ? "" : " bad"}` }),
       h("div", {}, [
         h("span", { text: ready ? "本机服务正常" : "服务未就绪" }),
-        h("small", { text: ready ? "数据已保存" : "请检查系统设置" }),
+        h("small", { text: ready ? "任务数据保存在本机" : "请检查系统设置" }),
       ]),
     ]),
     h("div", { class: "user" }, [
       h("span", { class: "avatar", text: "运" }),
       h("div", {}, [
-        h("span", { text: "运营管理员" }),
-        h("small", { text: "全部权限" }),
+        h("span", { text: "本机操作员" }),
+        h("small", { text: "本地数据" }),
       ]),
     ]),
   ]);
@@ -118,7 +134,7 @@ export function renderSidebar(state: Bootstrap, handlers: ShellHandlers): HTMLEl
   return h("aside", { class: "sidebar" }, [
     brandLockup(),
     h("div", { class: "context-label", text: "当前品牌任务" }),
-    taskSwitcher(state.task, handlers),
+    taskSwitcher(state.task, handlers, state.tasks),
     navList(state, handlers),
     sidebarFoot(state),
   ]);
@@ -132,7 +148,7 @@ function shopChip(shop: string, info: ShopState | undefined): HTMLElement {
     h("span", { class: `dot${loggedIn ? "" : " unknown"}` }),
     h("div", {}, [
       h("span", { text: info?.label || `抖店 ${shop}` }),
-      h("small", { text: loggedIn ? "已登录 · 端口 内置" : "未登录 · 端口 内置" }),
+      h("small", { text: loggedIn ? "已登录 · 端口 内置" : info?.status === "disconnected" ? "未登录 · 端口 内置" : "待检测 · 端口 内置" }),
     ]),
   ]);
 }
@@ -144,7 +160,7 @@ export function renderTopbar(state: Bootstrap, handlers: ShellHandlers): HTMLEle
     h("div", { class: "topbar-title" }, [
       h("span", { class: "crumb",
         text: `${state.task.name} / ${fmtNum(state.task.targetCount)} 人提报` }),
-      h("h1", { text: page?.label ?? "AIPR Pro" }),
+      h("h1", { text: page?.label ?? "千寻" }),
     ]),
     h("div", { class: "top-actions" }, [
       shopChip("A", shops.A),
@@ -201,7 +217,7 @@ export function progressBar(current: number, total: number): HTMLElement {
 }
 
 export function statusPill(status: string): HTMLElement {
-  return h("span", { class: `status-pill status-${status}`, text: status });
+  return h("span", { class: `status-pill status-${status}`, text: ({running:"运行中",paused:"已暂停",ended:"用户已结束",completed:"作业完成",failed:"失败",waiting:"等待中",idle:"未开始",unknown:"待检测"} as Record<string,string>)[status] || status });
 }
 
 export function emptyHint(text: string): HTMLElement {

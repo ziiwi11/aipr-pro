@@ -12,6 +12,25 @@ from creator_delivery_contract import (
 )
 
 class CreatorDeliveryContractTest(unittest.TestCase):
+    def test_saved_buyin_evidence_is_exported_with_source_label_without_fabricating_content(self):
+        candidate = {"identity": "saved-evidence", "content_evidence": ["#润唇膏 使用体验", "某品牌润唇膏3g"]}
+        row = build_delivery([candidate], {"threshold":78,"exclusions":[]}, "test")["rows"][0]
+        self.assertEqual(row["作品文字与近期内容"], "精选联盟已保存内容证据（含作品标题与商品名）：\n#润唇膏 使用体验 | 某品牌润唇膏3g")
+        self.assertNotIn("douyin_content_text", candidate)
+        candidate["douyin_content_text"] = "已采集的抖音作品正文"
+        self.assertEqual(build_delivery([candidate], {}, "test")["rows"][0]["作品文字与近期内容"], candidate["douyin_content_text"])
+        self.assertEqual(build_delivery([{"identity":"missing"}], {}, "test")["rows"][0]["作品文字与近期内容"], "")
+
+    def test_delivery_retains_platform_profile_without_turning_range_into_exact_sales(self):
+        candidate = {"identity":"business-data", "nickname":"样本", "fans":12345, "city":"山西·太原", "category":"美妆", "main_sale_type":"纯短视频", "video_count_30d":0, "monthly_sales_low":10000, "monthly_sales_high":25000, "monthly_sales_value":10000, "profile_text":"平台简介", "ui_contact_probe_at":"2026-10-09T03:00:00"}
+        row = build_delivery([candidate], {"threshold":78,"exclusions":[]}, "test")["rows"][0]
+        self.assertEqual(row["粉丝数"],12345)
+        self.assertEqual(row["近30天视频数"],0)
+        self.assertEqual(row["平台月销区间下界"],10000)
+        self.assertEqual(row["平台月销区间上界"],25000)
+        self.assertEqual(row["达人简介与平台资料"],"平台简介")
+        self.assertEqual(row["联系方式获取时间"],candidate["ui_contact_probe_at"])
+
     def test_structured_beauty_fast_path_respects_expanded_task_exclusions(self) -> None:
         rules = {
             "category": "美妆个护",

@@ -5,6 +5,8 @@ import json
 import os
 import subprocess
 import sys
+import time
+from contact_shop_cooldown import shop_cooldown_until
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -70,26 +72,58 @@ def profile_session_ready(final_url: str, body_text: str) -> bool:
     return "buyin.jinritemai.com" in str(final_url or "") and profile_content_ready(body_text)
 
 
-def probe_contact_shop(endpoint: str, profile_url: str) -> bool:
+def _probe_contact_profile(endpoint: str, profile_url: str) -> bool:
     try:
         prune_automation_pages(endpoint)
         with sync_playwright() as playwright:
             browser, context, _embedded_page = connect_shop(playwright.chromium, endpoint, timeout=10000)
             page = _embedded_page
+            request_errors = []
+            response_errors = []
+            page.on("requestfailed", lambda request: request_errors.append({"path": request.url.split("?")[0], "error": request.failure}))
+            page.on("response", lambda response: response_errors.append({"path": response.url.split("?")[0], "status": response.status}) if response.status >= 400 else None)
             page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
-            for _attempt in range(15):
-                body = page.locator("body").inner_text(timeout=3000)
+            for _attempt in range(45):
+                body = page.locator("body").inner_text(timeout=3000) or ""
                 if profile_session_ready(page.url, body):
                     return True
                 if "douyinec.com" in str(page.url or ""):
+                    emit({"status": "contact_shop_preflight_failed", "reason": "login_redirect", "message": "主页检查：跳转至登录页"})
                     return False
                 page.wait_for_timeout(1000)
+            diagnostic = {"request_errors": request_errors[-12:], "response_errors": response_errors[-12:], "url_path": page.url.split("?")[0], "body_length": len(body), "short_page_message": body if len(body) < 200 else "", "ready_state": page.evaluate("document.readyState"), "profile_markers": [token for token in ("已加达人库", "添加达人库", "达人手机号", "达人微信号", "登录", "请求过于频繁", "页面不存在", "暂无权限") if token in body]}
+            page.evaluate("window.__aiprPreflightDiagnostic = " + json.dumps(diagnostic))
+            from urllib.parse import parse_qs, urlsplit
+            lane = parse_qs(urlsplit(endpoint).query).get("shop", ["unknown"])[0]
+            Path(__file__).with_name(f"contact_preflight_diagnostic_{lane}.json").write_text(json.dumps(diagnostic, ensure_ascii=False), encoding="utf-8")
+            emit({"status": "contact_shop_preflight_failed", "reason": "profile_not_ready", "message": "主页检查：页面未就绪"})
             return False
-    except Exception:
+    except Exception as exc:
+        emit({"status": "contact_shop_preflight_failed", "reason": "probe_exception", "error_type": type(exc).__name__, "message": f"主页检查连接异常：{type(exc).__name__}"})
         return False
 
 
-def assign_contact_lanes(candidates: list[dict], active_shops: list[str] | None = None) -> list[dict]:
+def probe_contact_shop(endpoint: str, profile_urls) -> bool:
+    urls = [profile_urls] if isinstance(profile_urls, str) else profile_urls
+    for url in urls:
+        if _probe_contact_profile(endpoint, url):
+            return True
+    return False
+
+
+def contact_preflight_profiles(candidates, shop):
+    first = contact_preflight_profile_url(candidates, shop=shop)
+    urls = [first] if first else []
+    for row in reversed(candidates):
+        url = str(row.get('buyin_profile_url') or '').strip()
+        if row.get('precontact_qualified') is True and row.get('ui_contact_channels_status') == 'complete' and url and url not in urls:
+            urls.append(url)
+        if len(urls) >= 3:
+            break
+    return urls
+
+
+def assign_contact_lanes(candidates: list[dict], active_shops: list[str] | None = None, complete_channels: bool = False) -> list[dict]:
     assigned: list[dict] = []
     eligible_index = 0
     shops = [shop for shop in (active_shops or ["A", "B"]) if shop in {"A", "B"}]
@@ -100,8 +134,8 @@ def assign_contact_lanes(candidates: list[dict], active_shops: list[str] | None 
             bool(shops)
             and current.get("content_evidence_reviewed") is True
             and current.get("precontact_qualified") is True
-            and contact_totals([current])["plain"] == 0
-            and not terminal_contact_failure(current)
+            and (complete_channels or contact_totals([current])["plain"] == 0)
+            and (complete_channels or not terminal_contact_failure(current))
         )
         if eligible:
             source_shop = str(current.get("shop") or current.get("lip_shop") or "").upper()
@@ -124,7 +158,7 @@ def public_intro_required(candidates: list[dict], shop: str) -> bool:
     )
 
 
-def contact_preflight_profile_url(candidates: list[dict]) -> str:
+def contact_preflight_profile_url(candidates: list[dict], shop: str = "") -> str:
     """Choose a healthy profile for session preflight.
 
     A creator that previously returned a platform rate-limit response is still
@@ -132,6 +166,9 @@ def contact_preflight_profile_url(candidates: list[dict]) -> str:
     session is healthy.  Prefer an untouched profile so one poisoned row cannot
     make every embedded shop appear offline.
     """
+    if shop:
+        matching = [row for row in candidates if str(row.get("contact_shop") or row.get("shop") or row.get("lip_shop") or "").upper() == shop.upper()]
+        candidates = matching + [row for row in candidates if row not in matching]
     previously_opened = next((
         str(row.get("buyin_profile_url") or "").strip()
         for row in candidates
@@ -177,6 +214,12 @@ def save_strict_audit(
         max(1, target_count),
     )
     atomic_write_json(output_path, strict)
+    # This stage runs after the realtime collector has exited. Keep its ledger
+    # in step with contacts acquired by the subsequent bulk-contact stage.
+    flow_path = output_path.parent / "aipr_realtime_creator_flow.json"
+    if flow_path.exists():
+        from realtime_creator_flow import RealtimeCreatorFlowStore
+        RealtimeCreatorFlowStore(flow_path).reconcile_strict_selection(strict)
     return strict
 
 
@@ -209,6 +252,7 @@ def save_contact_and_strict_highwater(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--complete-contact-channels", action="store_true")
     parser.add_argument("--input", required=True)
     parser.add_argument("--out-dir", default="output")
     parser.add_argument("--delay-ms", type=int, default=3200)
@@ -240,10 +284,14 @@ def main() -> None:
         })
         raise SystemExit(7)
     emit({"status": "started", "message": "双店页面慢速联系方式流程已启动", "delay_ms": delay_ms})
-    working_payload = load_contact_highwater(output_dir, source_payload)
+    working_payload = source_payload if args.complete_contact_channels else load_contact_highwater(output_dir, source_payload)
     merged_candidates = [canonicalize_contact_fields(row) for row in merge_recent_contact_shards(output_dir, [
         item for item in working_payload.get("candidates") or [] if isinstance(item, dict)
     ])]
+    if args.complete_contact_channels:
+        for row in merged_candidates:
+            if row.get("ui_contact_channels_checked_at") and any(marker in str(row.get("ui_contact_message") or "") for marker in ("主推类目不属于店铺类目", "本周仅支持")):
+                row["ui_contact_channels_status"] = "category_not_matched"
     cached_intro_added = 0
     for row in merged_candidates:
         before_plain = contact_totals([row])["plain"]
@@ -264,15 +312,17 @@ def main() -> None:
     endpoints = {"A": args.shop_a, "B": args.shop_b}
     with ThreadPoolExecutor(max_workers=2) as executor:
         checks = {
-            shop: executor.submit(probe_contact_shop, endpoint, sample_profile_url)
+            shop: executor.submit(probe_contact_shop, endpoint, contact_preflight_profiles(merged_candidates, shop))
             for shop, endpoint in endpoints.items()
         }
         active_shops = [shop for shop, future in checks.items() if sample_profile_url and future.result()]
-    emit({"status": "contact_shop_preflight", "active_shops": active_shops})
+    cooling_shops = [shop for shop in active_shops if shop_cooldown_until(output_dir, shop) > time.time()]
+    active_shops = [shop for shop in active_shops if shop not in cooling_shops]
+    emit({"status": "contact_shop_preflight", "active_shops": active_shops, "cooling_shops": cooling_shops})
     if sample_profile_url and not active_shops:
         emit({"status": "error", "message": "no merchant workbench can open a creator profile"})
         raise SystemExit(8)
-    merged_candidates = assign_contact_lanes(merged_candidates, active_shops=active_shops)
+    merged_candidates = assign_contact_lanes(merged_candidates, active_shops=active_shops, complete_channels=args.complete_contact_channels)
     working_payload = {**working_payload, "candidates": merged_candidates}
     working_input = output_dir / contact_resume_filename(working_payload)
     working_input.write_text(json.dumps(working_payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -305,6 +355,8 @@ def main() -> None:
             sys.executable, str(single), "--input", str(contact_input),
             "--endpoint", endpoint, "--shop", shop, "--delay-ms", str(delay_ms),
         ]
+        if args.complete_contact_channels:
+            command.append("--complete-contact-channels")
         if args.limit:
             command.extend(["--limit", str(args.limit)])
         emit({"status": "shop_started", "shop": shop, "endpoint": endpoint})

@@ -35,15 +35,37 @@ function normalizeCreator(row = {}, index = 0) {
   const homepage = String(row["抖音主页"] || row.douyin_homepage || "").trim();
   const identity = String(row["主页身份ID"] || row.identity || row.buyin_uid || row.douyin_id || evidenceObject.buyin_account_id || "").trim();
   const reviewState = parseReviewState(row);
+  const jev = row.jev_analysis || parseEvidence(row["Jev内容复核"]);
+  const jevPending = jev.advisory_only === false && ["uncertain", "review_conflict"].includes(jev.route);
+  const jevReason = row.precontact_reason || jev.reason || "";
 
   return {
     id: identity || `delivery-${index + 1}`,
     name: decodeEntities(String(row["达人昵称"] || row.nickname || evidenceObject.buyin_nickname || `达人 ${index + 1}`)),
     douyin: identity || "待补抖音号",
+    nickname: decodeEntities(String(row["达人昵称"] || row.nickname || evidenceObject.buyin_nickname || `达人 ${index + 1}`)),
+    douyinId: String(row["抖音号"] || row.douyin_id || row.unique_id || identity).trim(),
+    fans: numberOr(row["粉丝数"] ?? row.fans, 0),
+    talentLevel: parseLevel(evidenceObject.buyin_level || row["达人等级"] || row["等级"] || row.author_level || row.talent_level),
+    category: String(row["类目"] || row.category || row.main_category || (Array.isArray(row.categories) ? row.categories.join("/") : row.categories) || "").trim(),
     douyinHomepage: homepage,
     buyinHomepage: String(row["精选联盟主页"] || row.buyin_profile_url || "").trim(),
     level: parseLevel(evidenceObject.buyin_level || row["达人等级"] || row["等级"] || row.author_level || row.talent_level),
     qualityLevel: String(row["等级"] || "").trim(),
+    city: String(row.city || row["城市"] || "").trim(),
+    mainSaleType: String(row.main_sale_type || row.mainSaleType || row["主要带货方式"] || "").trim(),
+    videoCount30d: optionalNumber(row.video_count_30d ?? row.videoCount30d ?? row["近30天视频数"]),
+    monthlySalesLow: optionalNumber(row.monthly_sales_low ?? row.monthlySalesLow ?? row["平台月销区间下界"]),
+    monthlySalesHigh: optionalNumber(row.monthly_sales_high ?? row.monthlySalesHigh ?? row["平台月销区间上界"]),
+    monthlySalesLowerBound: optionalNumber(row.monthly_sales_value),
+    monthlySalesDisplay: String(row["历史销售额"] || row["销售额"] || evidenceObject.monthly_sales || ""),
+    profileText: String(row.profile_text || row["达人简介与平台资料"] || ""),
+    contentText: String(row.douyin_content_text || row["作品文字与近期内容"] || savedContentText(row)),
+    contentEvidenceSource: String(row.content_evidence_source || row["作品证据来源"] || ""),
+    evidenceReviewedAt: String(row.evidence_reviewed_at || row["作品复核时间"] || ""),
+    contactEvidence: row.ui_contact_evidence || {},
+    libraryStatus: String(row.ui_add_library_status || row["平台入库状态"] || ""),
+    sourceDiscoveryMode: String(row.source_discovery_mode || ""),
     sales: parseMonthlySales(evidenceObject.monthly_sales || row["历史销售额"] || row["销售额"]),
     followers: formatFollowers(row["粉丝数"] ?? row.fans),
     categories: riskTags.length ? riskTags : splitTags(evidenceObject.category || row["品牌/内容证据"]),
@@ -51,17 +73,33 @@ function normalizeCreator(row = {}, index = 0) {
     evidenceReviewed: reviewState.evidenceReviewed,
     signals: { persona: normalizedSignal, content: normalizedSignal, sales: normalizedSignal, scene: normalizedSignal, price: normalizedSignal },
     sourceScore: score,
+    reason: String(row["推荐理由"] || row.precontact_reason || jev.reason || row.realtime_flow_reason || ""),
+    decision: String(row["推荐结论"] || row.precontact_state || ""),
+    jevAnalysis: jev,
+    contentEvidence: row["内容证据"] || row.content_evidence || evidenceObject,
+    evidenceScreenshot: String(row["内容证据截图"] || row.content_evidence_screenshot || (Array.isArray(row.evidence_screenshots) ? row.evidence_screenshots.filter(value => typeof value === "string" && value.trim()).join("\n") : "")),
+    flowState: String(row.realtime_flow_state || ""),
+    flowReason: String(row.realtime_flow_reason || ""),
+    contactSource: String(row["联系方式来源"] || row.contact_source || row.buyin_contact_source || row.cart_contact_source || ""),
+    contactAcquiredAt: String(row.contact_acquired_at || row["联系方式获取时间"] || row.ui_contact_channels_checked_at || row.ui_contact_probe_at || ""),
+    contactCorrectedAt: String(row.contact_corrected_at || row["联系方式修订时间"] || ""),
     plainContact: contact,
     wechat,
     phone,
     email,
     contact: contact ? (wechat ? "微信已获取" : phone ? "手机号已获取" : "联系方式已获取") : "待获取",
-    stage: contact ? "待建联" : reviewState.evidenceReviewed ? "联系方式" : "视觉复核",
+    stage: jevPending ? "内容复核" : contact ? "待建联" : reviewState.evidenceReviewed ? "联系方式" : "视觉复核",
     shop: String(row["分跑店铺"] || row.shop || "").trim(),
-    evidence: evidenceText(row, evidenceObject),
+    evidence: [evidenceText(row, evidenceObject), jevReason].filter(Boolean).join("；"),
     risk: String(row["风险标签"] || "暂无额外风险标签").trim(),
     sourceStatus: String(row["联系方式状态"] || row["联系方式提取状态"] || "").trim(),
   };
+}
+
+function savedContentText(row) {
+  const evidence = row["内容证据"] || row.content_evidence;
+  const text = Array.isArray(evidence) ? evidence.filter(value => typeof value === "string" && value.trim()).join(" | ") : typeof evidence === "string" ? evidence.trim() : "";
+  return text ? "精选联盟已保存内容证据（含作品标题与商品名）：\n" + text : "";
 }
 
 function validPlainContact(value) {
@@ -130,6 +168,12 @@ function formatFollowers(value) {
 
 function decodeEntities(value) {
   return value.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"');
+}
+
+function optionalNumber(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : undefined;
 }
 
 function numberOr(value, fallback) {

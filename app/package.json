@@ -1,17 +1,23 @@
 {
   "name": "aipr-operations-desktop",
-  "version": "1.0.0",
-  "author": "AIPR",
-  "description": "AIPR Pro 品牌通用达人运营桌面系统（macOS Apple Silicon / Windows x64 双平台构建）",
+  "version": "1.0.78",
+  "author": "千寻",
+  "description": "千寻 品牌通用达人运营桌面系统（macOS Apple Silicon / Windows x64 双平台构建）",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
   "dependencies": {},
   "scripts": {
-    "mac:build": "electron-builder --mac dmg zip --arm64",
-    "mac:dir": "electron-builder --mac dir --arm64",
-    "win:build": "electron-builder --win nsis portable --x64",
-    "win:dir": "electron-builder --win dir --x64"
+    "mac:build": "npm run verify && npm --prefix frontend run build && electron-builder --mac dmg zip --arm64",
+    "mac:dir": "npm --prefix frontend run build && electron-builder --mac dir --arm64",
+    "win:build": "npm run runtime:windows && npm run verify && npm --prefix frontend run build && electron-builder --win nsis portable --x64 --config.directories.output=release-windows",
+    "win:dir": "npm run runtime:windows && npm --prefix frontend run build && electron-builder --win dir --x64 --config.directories.output=release-windows",
+    "test:backend": "node scripts/test-backend.cjs",
+    "test:desktop": "node --test electron/*.test.cjs",
+    "test:frontend": "npm --prefix frontend test",
+    "verify": "npm run test:desktop && npm run test:frontend && npm --prefix frontend run typecheck && npm run test:backend",
+    "mac:package": "bash scripts/package-mac.sh",
+    "runtime:windows": "node scripts/check-windows-runtime.cjs"
   },
   "devDependencies": {
     "electron": "43.1.0",
@@ -19,7 +25,7 @@
   },
   "build": {
     "appId": "com.aipr.operations.desktop",
-    "productName": "AIPR Pro 达人运营系统",
+    "productName": "千寻",
     "asar": true,
     "directories": {
       "output": "release-macos"
@@ -32,15 +38,13 @@
     "extraResources": [
       {
         "from": "backend",
-        "to": "backend"
-      },
-      {
-        "from": "runtime/macos-arm64",
-        "to": "runtime/macos-arm64"
-      },
-      {
-        "from": "runtime/windows-x64",
-        "to": "runtime/windows-x64"
+        "to": "backend",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/test_*.py",
+          "!**/*.pyc"
+        ]
       }
     ],
     "mac": {
@@ -59,11 +63,23 @@
         }
       ],
       "category": "public.app-category.business",
-      "artifactName": "AIPR-Pro-Mac-M1-${version}-${arch}.${ext}"
+      "artifactName": "Qianxun-Mac-M1-${version}-${arch}.${ext}",
+      "extraResources": [
+        {
+          "from": "runtime/macos-arm64",
+          "to": "runtime/macos-arm64",
+          "filter": [
+            "**/*",
+            "!**/__pycache__/**",
+            "!**/*.pyc"
+          ]
+        }
+      ],
+      "icon": "build/icon.icns"
     },
     "dmg": {
-      "title": "AIPR Pro 达人运营系统 ${version}",
-      "artifactName": "AIPR-Pro-Mac-M1-${version}-${arch}.${ext}"
+      "title": "千寻 ${version}",
+      "artifactName": "Qianxun-Mac-M1-${version}-${arch}.${ext}"
     },
     "win": {
       "target": [
@@ -80,18 +96,34 @@
           ]
         }
       ],
-      "artifactName": "AIPR-Pro-Win-${version}-${arch}.${ext}"
+      "artifactName": "Qianxun-Win-${version}-${arch}.${ext}",
+      "extraResources": [
+        {
+          "from": "runtime/windows-x64",
+          "to": "runtime/windows-x64",
+          "filter": [
+            "**/*",
+            "!**/__pycache__/**",
+            "!**/*.pyc"
+          ]
+        },
+        {
+          "from": "scripts/windows-runtime-smoke.py",
+          "to": "diagnostics/windows-runtime-smoke.py"
+        }
+      ],
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "AIPR Pro 达人运营系统",
-      "artifactName": "AIPR-Pro-Win-Setup-${version}-${arch}.${ext}"
+      "shortcutName": "千寻",
+      "artifactName": "Qianxun-Win-Setup-${version}-${arch}.${ext}"
     },
     "portable": {
-      "artifactName": "AIPR-Pro-Win-Portable-${version}-${arch}.${ext}"
+      "artifactName": "Qianxun-Win-Portable-${version}-${arch}.${ext}"
     }
   }
 }

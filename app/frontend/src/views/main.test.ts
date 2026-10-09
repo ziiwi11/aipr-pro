@@ -84,11 +84,13 @@ const handlers = {
   onNavigate: vi.fn(),
   onImportBrief: vi.fn(),
   onImportFile: vi.fn(),
+  onImportDelivery: vi.fn(),
 };
 
 function render(state: Bootstrap) {
   const root = document.createElement("div");
   document.body.replaceChildren(root);
+  if(!state.creatorLibrary && state.creators?.length)state.creatorLibrary={creators:state.creators.map(c=>({...c,libraryTaskIds:["historical-test"]})),batches:[{id:"historical-test",name:"往期测试批",count:state.creators.length}]};
   renderBootstrap(root, state, handlers);
   return root;
 }
@@ -114,7 +116,7 @@ describe("应用外壳 — 对齐原版结构", () => {
   it("侧边栏含品牌标识", () => {
     const root = render(makeBootstrap());
     expect(root.querySelector(".brand-lockup")).toBeTruthy();
-    expect(root.querySelector(".brand-lockup")?.textContent).toContain("AIPR Pro");
+    expect(root.querySelector(".brand-lockup")?.textContent).toContain("千寻");
   });
 
   it("侧边栏含任务切换与上下文标签", () => {
@@ -144,10 +146,10 @@ describe("应用外壳 — 对齐原版结构", () => {
   });
 });
 
-describe("导航 — 9 个页面", () => {
-  it("nav 内恰好 9 个按钮", () => {
+describe("导航 — 8 个模块", () => {
+  it("联系方式与建联合并为单一导航入口", () => {
     const root = render(makeBootstrap());
-    expect(root.querySelectorAll("nav button").length).toBe(9);
+    expect(root.querySelectorAll("nav button").length).toBe(8);
   });
 
   it("菜单标签与原版一致", () => {
@@ -156,8 +158,7 @@ describe("导航 — 9 个页面", () => {
       (b) => b.textContent?.replace(/\d+$/, "").trim(),
     );
     expect(labels).toEqual([
-      "自动采集", "任务总览", "品牌手卡", "达人优选", "联系方式",
-      "AI 建联", "交付中心", "系统设置", "抖店浏览器",
+      "自动采集", "任务总览", "品牌手卡", "达人优选", "联系与交付", "分析模型", "系统设置", "抖店浏览器",
     ]);
   });
 
@@ -178,6 +179,27 @@ describe("导航 — 9 个页面", () => {
   it("无正式名单时不显示角标", () => {
     const root = render(makeBootstrap());
     expect(root.querySelector(".nav-badge")).toBeFalsy();
+  });
+});
+
+describe("历史交付导入保护", () => {
+  it("活动采集期间不允许导入覆盖名单", () => {
+    setCurrentPage("delivery");
+    const root=render(makeBootstrap());
+    const button=Array.from(root.querySelectorAll("button")).find(b=>b.textContent==="导入历史交付 JSON")!;
+    expect(button.disabled).toBe(true);
+    button.click();
+    expect(handlers.onImportDelivery).not.toHaveBeenCalled();
+  });
+  it("停止后允许显式导入，不触发采集或外发", () => {
+    setCurrentPage("delivery");
+    const state=makeBootstrap();state.task.status="paused";
+    const root=render(state);
+    const button=Array.from(root.querySelectorAll("button")).find(b=>b.textContent==="导入历史交付 JSON")!;
+    button.click();
+    expect(handlers.onImportDelivery).toHaveBeenCalledOnce();
+    expect(handlers.onStartWorker).not.toHaveBeenCalled();
+    expect(handlers.onStartOutreach).not.toHaveBeenCalled();
   });
 });
 
@@ -220,9 +242,9 @@ describe("AI 建联页 — 增量脚本挂载点", () => {
 });
 
 describe("自动采集页 — 进度与策略", () => {
-  it("进度按 collected/targetCount 计算", () => {
+  it("进度按正式明文名单/targetCount 计算", () => {
     const root = render(makeBootstrap());
-    expect(root.querySelector(".progress-label")?.textContent).toContain("40%");
+    expect(root.querySelector(".progress-label")?.textContent).toContain("30%");
   });
 
   it("目标为 0 时不除零", () => {
@@ -232,21 +254,21 @@ describe("自动采集页 — 进度与策略", () => {
     expect(root.querySelector(".progress-label")?.textContent).toContain("0%");
   });
 
-  it("有策略时显示摘要", () => {
+  it("自动采集直接显示筛选字段", () => {
     const root = render(makeBootstrap());
-    expect(root.querySelector(".strategy-summary")).toBeTruthy();
+    expect(root.querySelector('[aria-label="类目"]')).toBeTruthy();
   });
 
   it("无策略时提示配置", () => {
     const b = makeBootstrap();
     b.task = { ...b.task, collectionStrategy: undefined };
     const root = render(b);
-    expect(root.querySelector(".strategy-section")?.textContent).toContain("尚未配置");
+    expect(root.querySelector('[aria-label="类目"]')).toBeTruthy();
   });
 
   it("显示状态标签", () => {
     const root = render(makeBootstrap());
-    expect(root.querySelector(".status-pill")?.textContent).toBe("running");
+    expect(root.querySelector(".status-pill")?.textContent).toBe("运行中");
   });
 });
 
@@ -254,7 +276,7 @@ describe("达人表格 — 分页与搜索", () => {
   it("每页最多 50 条", () => {
     setCurrentPage("creators");
     const rows = Array.from({ length: 120 }, (_, i) => makeCreator(i));
-    const root = render(makeBootstrap({ candidateCreators: rows }));
+    const root = render(makeBootstrap({ creators: rows }));
     const table = root.querySelector(".creator-table");
     expect(table?.querySelectorAll("tr").length).toBe(51);
   });
@@ -262,7 +284,7 @@ describe("达人表格 — 分页与搜索", () => {
   it("分页信息显示总页数", () => {
     setCurrentPage("creators");
     const rows = Array.from({ length: 120 }, (_, i) => makeCreator(i));
-    const root = render(makeBootstrap({ candidateCreators: rows }));
+    const root = render(makeBootstrap({ creators: rows }));
     const info = root.querySelector(".pager-info")?.textContent ?? "";
     expect(info).toContain("1 / 3");
     expect(info).toContain("120");
@@ -271,7 +293,7 @@ describe("达人表格 — 分页与搜索", () => {
   it("第一页上一页禁用", () => {
     setCurrentPage("creators");
     const rows = Array.from({ length: 120 }, (_, i) => makeCreator(i));
-    const root = render(makeBootstrap({ candidateCreators: rows }));
+    const root = render(makeBootstrap({ creators: rows }));
     const btns = root.querySelectorAll<HTMLButtonElement>(".table-toolbar button");
     expect(btns[0].disabled).toBe(true);
     expect(btns[1].disabled).toBe(false);
@@ -280,14 +302,14 @@ describe("达人表格 — 分页与搜索", () => {
   it("少于 50 条时只有 1 页", () => {
     setCurrentPage("creators");
     const rows = Array.from({ length: 10 }, (_, i) => makeCreator(i));
-    const root = render(makeBootstrap({ candidateCreators: rows }));
+    const root = render(makeBootstrap({ creators: rows }));
     expect(root.querySelector(".pager-info")?.textContent).toContain("1 / 1");
   });
 
-  it("表格 7 列", () => {
+  it("表格包含邮箱和复核依据", () => {
     setCurrentPage("creators");
-    const root = render(makeBootstrap({ candidateCreators: [makeCreator(1)] }));
-    expect(root.querySelectorAll(".creator-table th").length).toBe(7);
+    const root = render(makeBootstrap({ creators: [makeCreator(1)] }));
+    expect([...root.querySelectorAll(".creator-table th")].map(th => th.textContent)).toContain("复核依据");
   });
 
   it("空列表显示提示", () => {
@@ -389,7 +411,7 @@ describe("ROI 转化漏斗面板", () => {
     setCurrentPage("dashboard");
     const root = render(withRoi());
     const labels = [...root.querySelectorAll(".funnel-label")].map((e) => e.textContent);
-    expect(labels).toEqual(["候选达人", "已验证", "预接触合格", "已揭示联系方式", "已交付"]);
+    expect(labels).toEqual(["候选达人", "已验证", "预接触合格", "已揭示联系方式", "历史入选标记"]);
   });
 
   it("漏斗条宽度按比例（候选最宽）", () => {
@@ -434,7 +456,126 @@ describe("ROI 转化漏斗面板", () => {
     setCurrentPage("dashboard");
     const root = render(withRoi());
     const text = root.textContent ?? "";
-    expect(text).toContain("JEV");
+    expect(text).toContain("Jev 内容判断");
     expect(text).toContain("20.0");
   });
+});
+
+it("dashboard separates saved formal progress from candidate counts and shows dated errors", () => {
+ setCurrentPage("dashboard");
+ const root=render(makeBootstrap({ task: { ...makeBootstrap().task, targetCount:1000, collected:3059,plainContacts:584 }, runHistory:[{ recordedAt:"2026-10-07T14:56:58Z",status:"pipeline_error",message:"Jev HTTP 402：账户需要处理" }] }));
+ expect(root.textContent).toContain("584 / 1,000");
+ expect(root.textContent).not.toContain("100%（3,059");
+ expect(root.textContent).toContain("Jev HTTP 402：账户需要处理");
+});
+
+
+describe("分析模型配置与真实用量", () => {
+ it("独立入口展示未知余额，官网入口及保留 Key 的配置", () => {
+  setCurrentPage("models");
+  const open = vi.fn();
+  const root = document.createElement("div");
+  renderBootstrap(root, makeBootstrap({jevStatus:{enabled:true, configured:true, decisionMode:true,model:"jev-latest"}}), {...handlers,onOpenJevConsole:open});
+  expect(root.textContent).toContain("账户余额未知");
+  expect(root.textContent).toContain("此前历史消耗未知");
+  expect(root.textContent).toContain("不代表调用已验证");
+  expect(root.querySelector<HTMLInputElement>('[aria-label="Jev API Key"]')?.value).toBe("");
+  [...root.querySelectorAll("button")].find(b=>b.textContent?.includes("充值 / 额度管理"))!.click();
+  expect(open).toHaveBeenCalledOnce();
+ });
+ it("用量含缺失记录时披露覆盖范围，最新账户阻断不被旧成功掩盖", () => {
+  setCurrentPage("models");
+  const root=render(makeBootstrap({jevStatus:{enabled:true,configured:true,decisionMode:true,usage:{calls:2,inputTokens:120,outputTokens:null,inputCoverage:1,outputCoverage:0,firstAt:"2026-10-08T00:00:00Z",lastAt:"2026-10-08T00:00:00Z",lastModel:"jev-1.13.0",invalidRows:0,readError:false,balance:null,billedAmount:null}},runHistory:[{status:"jev_action_required",recordedAt:"2026-10-08T01:00:00Z",message:"HTTP 402"}]}));
+  expect(root.textContent).toContain("120 Token · 1/2");
+  expect(root.textContent).toContain("HTTP 402");
+  expect(root.textContent).toContain("处理后尚未重新验证");
+  expect(root.textContent).toContain("jev-1.13.0");
+ });
+});
+
+
+describe("审查问题回归", () => {
+  it("导航无需等待远程刷新即可显示目标页面", () => {
+    const root = render(makeBootstrap());
+    [...root.querySelectorAll<HTMLButtonElement>("nav button")].find(b => b.textContent === "分析模型")!.click();
+    expect(root.querySelector(".topbar h1")?.textContent).toBe("分析模型");
+    expect(handlers.onNavigate).toHaveBeenCalledWith("models");
+  });
+  it("复核详情展示判断依据及缺失截图，不授权或外发", () => {
+    setCurrentPage("creators");
+    const root=render(makeBootstrap({creators:[{nickname:"样本",reason:"近期唇护理作品",jevAnalysis:{model:"jev-test",reason:"证据待核实",confidence:0.7}}]}));
+    [...root.querySelectorAll<HTMLButtonElement>("button")].find(b=>b.textContent==="查看详情")!.click();
+    const dialog=document.querySelector("dialog")!;
+    expect(dialog.textContent).toContain("近期唇护理作品");
+    expect(dialog.textContent).toContain("证据待核实");
+    expect(dialog.textContent).toContain("未记录截图");
+    expect(handlers.onAuthorizeOutreach).not.toHaveBeenCalled();
+    expect(handlers.onStartOutreach).not.toHaveBeenCalled();
+  });
+  it("达人资料显示平台销售区间和真实零视频，不把下界当精确销售", () => {
+    setCurrentPage("creators");
+    const root=render(makeBootstrap({creators:[{nickname:"资料样本",city:"山西·太原",monthlySalesLow:10000,monthlySalesHigh:25000,videoCount30d:0,mainSaleType:"纯短视频",profileText:"平台简介"}]}));
+    expect(root.textContent).toContain("¥10,000–¥25,000（平台区间）");
+    [...root.querySelectorAll<HTMLButtonElement>("button")].find(b=>b.textContent==="查看详情")!.click();
+    const dialog=document.querySelector("dialog")!;
+    expect(dialog.textContent).toContain("山西·太原");expect(dialog.textContent).toContain("纯短视频");
+    expect(dialog.textContent).toContain("平台简介");
+    const section=[...dialog.querySelectorAll("section")].find(e=>e.querySelector("h3")?.textContent==="近30天视频数")!;
+    expect(section.querySelector("pre")?.textContent).toBe("0");
+  });
+  it("搜索多个字符后保留焦点和输入值", () => {
+    setCurrentPage("creators");
+    const root=render(makeBootstrap({candidateCreators:[makeCreator(1)]}));
+    const search=root.querySelector<HTMLInputElement>(".table-search")!;
+    search.value="达人"; search.dispatchEvent(new Event("input"));
+    expect((document.activeElement as HTMLInputElement).value).toBe("达人");
+  });
+});
+
+it("交付快照漏斗为零时仍显示真实导出584，并保留原1000目标", () => {
+ setCurrentPage("dashboard");
+ const state=makeBootstrap(); state.task={...state.task,status:"ended",endedReason:"用户结束本批",targetCount:1000,plainContacts:584,collected:3059};
+ state.deliveryCenter={available:true,artifacts:{},metrics:{exportedCount:584},roi:{funnel:{candidates:584,verified:584,qualified:584,revealed:584,delivered:0,rates:{verify_rate:"100",qualify_rate:"100",reveal_rate:"100",deliver_rate:"0",end_to_end_rate:"0"}}} as never};
+ const root=render(state); expect(root.textContent).toContain("584 人（按实际交付 JSON 行数）");
+ expect(root.textContent).toContain("原目标 1,000 人"); expect(root.textContent).toContain("用户结束本批");
+ expect(root.querySelector(".progress-fill")).toBeFalsy();
+});
+it("待复核标签显示缺证据原因，不混入正式名单",()=>{
+ setCurrentPage("auto-collect");const root=render(makeBootstrap({creators:[{nickname:"正式"}],candidateCreators:[{nickname:"待核",flowState:"insufficient_evidence",flowReason:"缺少近期作品"}]}));
+ root.querySelector("details summary")?.dispatchEvent(new Event("click"));
+ expect(root.querySelector(".creator-table")?.textContent).toContain("待核");expect(root.querySelector(".creator-table")?.textContent).not.toContain("正式");
+ [...root.querySelectorAll<HTMLButtonElement>("button")].find(b=>b.textContent==="查看详情")!.click();expect(document.querySelector("dialog")?.textContent).toContain("缺少近期作品");
+});
+it("品牌手卡保留原简报内容，可编辑保存而不启动采集",()=>{
+ setCurrentPage("brand-card");
+ const state=makeBootstrap();state.task.collectionStrategy={brief:"唇护理原始简报\n宽松美妆适配",brandName:"唇本",maximumFollowers:0};
+ const save=vi.fn().mockResolvedValue(undefined);const root=document.createElement("div");document.body.replaceChildren(root);renderBootstrap(root,state,{...handlers,onSaveBrandCard:save});
+ const brief=root.querySelector<HTMLTextAreaElement>('[aria-label="任务简报"]')!;expect(brief.value).toContain("唇护理原始简报");brief.value="修改后的简报";
+ [...root.querySelectorAll<HTMLButtonElement>("button")].find(b=>b.textContent==="保存品牌手卡")!.click();
+ expect(save).toHaveBeenCalledWith(expect.objectContaining({brief:"修改后的简报",brandName:"唇本"}));expect(handlers.onStartCollection).not.toHaveBeenCalled();
+});
+it("维护进行中禁止再次备份恢复，并显示软件版本",()=>{
+ setCurrentPage("settings");const state=makeBootstrap({appVersion:"1.0.22",maintenance:{busy:true,message:"正在备份",files:10,bytes:1000,lastBackup:""}});const root=render(state);
+ expect(root.textContent).toContain("1.0.22");
+ expect([...root.querySelectorAll<HTMLButtonElement>("button")].find(b=>b.textContent==="备份任务与名单")!.disabled).toBe(true);
+ expect([...root.querySelectorAll<HTMLButtonElement>("button")].find(b=>b.textContent==="校验并恢复备份")!.disabled).toBe(true);
+});
+
+it("旧联系人入口进入合并模块，保留联系人表与建联预览入口且不启动外发",()=>{setCurrentPage("contacts");handlers.onStartOutreach.mockClear();handlers.onSyncOutreach.mockClear();const root=render(makeBootstrap({creators:[makeCreator(0)]}));expect(root.querySelector(".contact-layout")?.textContent).toContain("wx0");expect(root.querySelector(".outreach-banner")).toBeTruthy();expect(root.querySelector("nav button.active")?.textContent).toContain("联系与交付");expect(handlers.onStartOutreach).not.toHaveBeenCalled();expect(handlers.onSyncOutreach).not.toHaveBeenCalled();});
+
+it("旧交付入口进入同一模块，三个区域同时存在且运行中禁用生成交付",()=>{setCurrentPage("delivery");const root=render(makeBootstrap());expect(root.querySelector(".contact-layout")).toBeTruthy();expect(root.querySelector(".outreach-banner")).toBeTruthy();expect(root.querySelector(".delivery-center-page")).toBeTruthy();const deliver=[...root.querySelectorAll<HTMLButtonElement>("button")].find(b=>b.textContent==="生成当前名单交付包");expect(deliver?.disabled).toBe(true);expect(root.querySelector("nav button.active")?.textContent).toContain("联系与交付");});
+
+it("往期库排除仅属于当前任务的达人，本批联系交付不含往期",()=>{const state=makeBootstrap({creators:[{nickname:"本批专属",wechat:"current"}],creatorLibrary:{creators:[{nickname:"往期专属",wechat:"past",libraryTaskIds:["past"]},{nickname:"本批专属",wechat:"current",libraryTaskIds:["t1"]}],batches:[{id:"past",name:"旧批",count:1},{id:"t1",name:"当前批",count:1}]}});state.task.id="scope-current";state.creatorLibrary!.batches[1].id="scope-current";state.creatorLibrary!.creators[1].libraryTaskIds=["scope-current"];setCurrentPage("creators");let root=render(state);expect(root.querySelector(".creator-table")?.textContent).toContain("往期专属");expect(root.querySelector(".creator-table")?.textContent).not.toContain("本批专属");setCurrentPage("outreach");root=render(state);expect(root.querySelector(".contact-layout")?.textContent).toContain("本批专属");expect(root.querySelector(".contact-layout")?.textContent).not.toContain("往期专属");});
+it("往期仅包括已完成或已结束批次，未作业的验收导入保留但不混入",()=>{setCurrentPage("creators");const state=makeBootstrap({creatorLibrary:{creators:[{nickname:"已完成达人",libraryTaskIds:["completed"]},{nickname:"已结束达人",libraryTaskIds:["ended"]},{nickname:"未启动验收",libraryTaskIds:["idle"]}],batches:[{id:"completed",name:"完成批次",count:1,status:"completed"},{id:"ended",name:"结束批次",count:1,status:"ended"},{id:"idle",name:"验收导入",count:1,status:"idle"}]}});state.task.id="history-status-test";const root=render(state);expect(root.querySelector(".creator-table")?.textContent).toContain("已完成达人");expect(root.querySelector(".creator-table")?.textContent).toContain("已结束达人");expect(root.querySelector(".creator-table")?.textContent).not.toContain("未启动验收");expect(root.querySelector('[aria-label="往期达人批次"]')?.textContent).not.toContain("验收导入");expect(state.creatorLibrary!.creators.length).toBe(3);});
+
+it("往期修复只在优选显示，并提交历史范围而不操作本批",()=>{
+ const repair=vi.fn();const state=makeBootstrap({historicalWechatRepairCount:1,savedWechatRepairCount:0,creatorLibrary:{creators:[],batches:[]}});
+ state.task.status="paused";state.task.id="history-repair66";setCurrentPage("creators");const root=document.createElement("div");document.body.replaceChildren(root);renderBootstrap(root,state,{...handlers,onRepairSavedWechat:repair});
+ const button=[...root.querySelectorAll<HTMLButtonElement>("button")].find(b=>b.textContent==="恢复往期完整微信号（1条）");expect(button).toBeTruthy();button!.click();expect(repair).toHaveBeenCalledWith("history");
+ setCurrentPage("outreach");renderBootstrap(root,state,{...handlers,onRepairSavedWechat:repair});expect(root.textContent).not.toContain("恢复往期完整微信号");
+});
+it("当前任务往期可记录修订，其他任务历史仅查看避免写错归属",()=>{
+ const state=makeBootstrap({creatorLibrary:{creators:[{id:"own",nickname:"本任务往期",libraryTaskIds:["history-edit66-batch-baseline"]},{id:"other",nickname:"其他任务历史",libraryTaskIds:["past"]}],batches:[{id:"history-edit66-batch-baseline",name:"本任务基线",count:1,status:"ended"},{id:"past",name:"其他任务",count:1,status:"ended"}]}});
+ state.task.id="history-edit66";setCurrentPage("creators");const root=document.createElement("div");document.body.replaceChildren(root);renderBootstrap(root,state,{...handlers,onSaveContactCorrection:vi.fn()});
+ const buttons=[...root.querySelectorAll<HTMLButtonElement>("button")].filter(b=>b.textContent==="查看详情");buttons[0].click();expect(document.querySelector("dialog")?.textContent).toContain("人工修订联系方式与历史");document.querySelector("dialog")?.remove();buttons[1].click();expect(document.querySelector("dialog")?.textContent).not.toContain("人工修订联系方式与历史");
 });

@@ -9,10 +9,11 @@ import type { Bootstrap } from "../types";
 import { h, mount } from "../store";
 import { renderShell, setCurrentPage, getCurrentPage, type ShellHandlers } from "./shell";
 import { renderPage, type PageHandlers } from "./pages";
+import {guardDraftNavigation} from '../draft-navigation';
 
 /** 任务创建（侧边栏任务切换用） */
 export interface TaskHandlers {
-  onCreateTask(name: string, targetCount: number): void;
+  onCreateTask(name: string, targetCount: number, strategy?: import("../types").CollectionStrategy): void | Promise<void>;
 }
 
 export type ViewHandlers = ShellHandlers & PageHandlers & TaskHandlers;
@@ -29,11 +30,23 @@ export function renderBootstrap(
 
   renderShell(root, state, {
     onNavigate: (pageId) => {
-      setCurrentPage(pageId);
-      handlers.onNavigate(pageId);
+      if(pageId===getCurrentPage())return;
+      guardDraftNavigation(root,()=>{
+        setCurrentPage(pageId);
+        rerender();
+        handlers.onNavigate(pageId);
+      });
     },
-    onSelectTask: handlers.onSelectTask,
-    onRefresh: handlers.onRefresh,
+    onSelectTask: taskId => {
+      guardDraftNavigation(root,()=>{handlers.onSelectTask(taskId);},()=>{
+        const selector=root.querySelector<HTMLSelectElement>('[aria-label="选择品牌任务"]');
+        if(selector)selector.value=state.task.id;
+      });
+    },
+    onCreateTask: handlers.onCreateTask,
+    onReadBrief: handlers.onReadBrief,
+    onUnderstandBrief: handlers.onUnderstandBrief,
+    onRefresh: () => guardDraftNavigation(root,handlers.onRefresh),
     onProbeLogin: handlers.onProbeLogin,
   }, pageBody);
 }

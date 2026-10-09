@@ -407,9 +407,9 @@ class CollectionHighWaterTest(unittest.TestCase):
         filtered = filter_resumed_candidate_pool(candidates, strategy)
         self.assertEqual(list(filtered), ["creator"])
 
-    def test_applies_the_one_wan_buyin_sales_filter(self):
+    def test_does_not_claim_a_sales_filter_from_an_unscoped_text_click(self):
         labels = strategy_filter_labels({"category": "服饰内衣", "minimumMonthlySales": 10000})
-        self.assertIn("1万以上", labels)
+        self.assertNotIn("1万以上", labels)
 
     def test_source_pool_oversamples_contact_required_tasks(self):
         self.assertEqual(source_pool_target(100, True), 300)

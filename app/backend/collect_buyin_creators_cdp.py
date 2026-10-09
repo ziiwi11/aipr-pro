@@ -4,12 +4,13 @@ import argparse
 from asyncio import CancelledError
 import json
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.request import urlopen
 
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 from atomic_json_io import atomic_write_json
 from console_io import configure_utf8_stdout
@@ -32,15 +33,14 @@ SAFETY_MARKERS = (
     "当前环境存在风险",
 )
 CATEGORY_LABELS = {
-    # 「美妆个护」同时勾选「美妆」与「个护家清」两个平台标签：
-    # 判定侧 creator_delivery_contract 本就接受「美妆」或「个护家清」，
-    # 但采集侧此前只勾「美妆」，导致大量个护家清达人未被纳入候选。
+    # Platform permits one main category per request. Combined software scope
+    # is browsed as separate category checkpoints, never simultaneous clicks.
     "美妆个护": ["美妆", "个护家清"],
     "个护家清": ["个护家清"],
     "服饰内衣": ["服饰内衣"],
     "母婴宠物": ["母婴宠物"],
     "食品饮料": ["食品饮料"],
-    "泛生活好物": ["生活家居"],
+    "泛生活好物": [],  # Legacy software brief only; not a platform main category.
 }
 
 
@@ -266,6 +266,8 @@ def source_browse_profile_id(strategy: dict[str, Any]) -> str:
         f"lv:{levels}",
         f"fans:{int(strategy.get('minimumFollowers') or 0)}-{int(strategy.get('maximumFollowers') or 0)}",
         f"contact:{bool(strategy.get('requireContact'))}",
+        *(["category-union-v2"] if compact(strategy.get("category"))=="美妆个护" else []),
+        *([f"topic:{compact(strategy.get('platformContentTopic'))}"] if compact(strategy.get("platformContentTopic")) else []),
     ))
 
 
@@ -301,7 +303,7 @@ def completed_pages_from_payload(payload: dict[str, Any]) -> dict[str, set[int]]
     result: dict[str, set[int]] = {}
     for shop, pages in raw.items():
         normalized_shop = compact(shop).upper()
-        if normalized_shop not in {"A", "B"} or not isinstance(pages, list):
+        if normalized_shop.split(":",1)[0] not in {"A", "B"} or not isinstance(pages, list):
             continue
         normalized_pages: set[int] = set()
         for page in pages:
@@ -341,7 +343,7 @@ def serialized_completed_pages(
     return {
         compact(shop).upper(): sorted(int(page) for page in pages if int(page) > 0)
         for shop, pages in (completed_pages_by_shop or {}).items()
-        if compact(shop).upper() in {"A", "B"}
+        if compact(shop).upper().split(":",1)[0] in {"A", "B"}
     }
 
 
@@ -552,37 +554,93 @@ def trigger_structured_browse(page: Page) -> None:
 
 
 def strategy_filter_labels(strategy: dict[str, Any]) -> list[str]:
-    category = compact(strategy.get("category"))
+    category = compact(strategy.get("sourcePlatformCategory") or strategy.get("category"))
     content_type = compact(strategy.get("contentType"))
-    labels = [*(CATEGORY_LABELS.get(category) or [category])]
+    labels = list(CATEGORY_LABELS.get(category, [category]))
     if content_type in {"真人口播", "短视频"}:
         labels.append("视频达人")
     elif content_type:
         labels.append(content_type)
     if strategy.get("requireContact"):
         labels.append("有联系方式")
-    minimum_sales = int(strategy.get("minimumMonthlySales") or 0)
-    if minimum_sales >= 100000:
-        labels.append("10万以上")
-    elif minimum_sales >= 50000:
-        labels.append("5万以上")
-    elif minimum_sales >= 10000:
-        labels.append("1万以上")
+    topic = compact(strategy.get("platformContentTopic"))
+    if topic:
+        labels.append(topic)
     return list(dict.fromkeys(item for item in labels if item))
+
+
+def category_is_confirmed(body: str, category: str) -> bool:
+    # Buyin commits a main category only after choosing its child "不限".
+    # The visible "已筛选" chip is the confirmation, never the click itself.
+    normalized = re.sub(r"\s+", "", body)
+    return "已筛选" in normalized and f"主推类目：{category}/不限" in normalized
 
 
 def apply_strategy_filters(page: Page, strategy: dict[str, Any]) -> list[str]:
     applied: list[str] = []
+    category = compact(strategy.get("sourcePlatformCategory") or strategy.get("category"))
+    categories = CATEGORY_LABELS.get(category, [category])
+    if len(categories)>1:
+        raise RuntimeError("buyin_category_requires_separate_profiles")
+    for label in categories:
+        if not label:
+            continue
+        if not click_text(page, label):
+            raise RuntimeError(f"buyin_filter_not_found:主推类目:{label}")
+        page.wait_for_timeout(250)
+        # Only the visible submenu's exact child. A main-category click opens
+        # the menu; it does not commit a selection.
+        choice = page.get_by_text("不限", exact=True).filter(visible=True).first
+        if not choice.count():
+            raise RuntimeError(f"buyin_category_child_not_found:{label}")
+        choice.click(timeout=2000, force=True)
+        page.wait_for_timeout(400)
+        body = page.locator("body").inner_text(timeout=3000)
+        if not category_is_confirmed(body, label):
+            raise RuntimeError(f"buyin_category_not_confirmed:{label}")
+        applied.append(label)
+    # A platform version that replaces instead of combines selections cannot
+    # silently satisfy a combined category. Stop rather than broaden scope.
+    body = page.locator("body").inner_text(timeout=3000) if any(categories) else ""
+    if any(not category_is_confirmed(body, label) for label in categories if label):
+        raise RuntimeError("buyin_category_combination_not_confirmed")
     for label in strategy_filter_labels(strategy):
+        if label in categories:
+            continue
+        sale_type = compact(strategy.get("contentType"))
+        sale_type = "视频达人" if sale_type in {"真人口播", "短视频"} else sale_type
+        if label == sale_type:
+            radio = page.get_by_role("radio", name=label, exact=True).first
+            radio.click(timeout=3000)
+        elif not click_text(page, label):
+            raise RuntimeError(f"buyin_filter_not_found:{label}")
+        applied.append(label)
+    levels = [int(level) for level in strategy.get("creatorLevels") or []]
+    if len(levels) == 1:
+        click_text(page, "达人等级")
+        label = f"LV{levels[0]}"
         if click_text(page, label):
             applied.append(label)
-    levels = [int(level) for level in strategy.get("creatorLevels") or []]
-    if levels:
-        click_text(page, "达人等级")
-        for level in levels:
-            label = f"LV{level}"
-            if click_text(page, label):
-                applied.append(label)
+    content_type=compact(strategy.get("contentType"))
+    content_type="视频达人" if content_type in {"真人口播","短视频"} else content_type
+    if content_type:
+        radio=page.get_by_role("radio", name=content_type, exact=True).first
+        confirmed=False
+        try:
+            confirmed=radio.is_checked() or radio.get_attribute("aria-checked")=="true"
+        except Exception:
+            pass
+        if not confirmed:
+            raise RuntimeError(f"buyin_sale_type_not_confirmed:{content_type}")
+    topic=compact(strategy.get("platformContentTopic"))
+    if topic:
+        body=re.sub(r"\s+","",page.locator("body").inner_text(timeout=3000))
+        if "已筛选" not in body or f"内容类型：{topic}" not in body:
+            raise RuntimeError(f"buyin_content_topic_not_confirmed:{topic}")
+    emit({"status":"platform_filters_confirmed", "categories":[x for x in categories if x],
+          "sale_type":content_type,"content_topic":topic,
+          "local_checks":["粉丝数","达人等级","联系方式","月销金额下界"],
+          "work_review":["达人类型","出镜方式"]})
     return applied
 
 
@@ -722,6 +780,9 @@ def candidate_matches_strategy(candidate: dict[str, Any], strategy: dict[str, An
         return False
     if maximum_followers and fans > maximum_followers:
         return False
+    minimum_sales = max(0, int(strategy.get("minimumMonthlySales") or 0))
+    if minimum_sales and (candidate.get("monthly_sales_low") is None or parse_count(candidate.get("monthly_sales_low")) < minimum_sales):
+        return False
     minimum_videos_30d = max(0, int(strategy.get("minimumVideos30d") or 0))
     if minimum_videos_30d and parse_count(candidate.get("video_count_30d")) < minimum_videos_30d:
         return False
@@ -731,7 +792,7 @@ def candidate_matches_strategy(candidate: dict[str, Any], strategy: dict[str, An
         token in keywords for token in ("唇", "口红", "美妆", "护肤")
     )
     if beauty_task:
-        if normalize_gender(candidate.get("gender")) != 2:
+        if strategy.get("requireFemale", True) and normalize_gender(candidate.get("gender")) != 2:
             return False
         creator_categories = compact(candidate.get("category"))
         if creator_categories and not any(
@@ -817,6 +878,10 @@ def merge_candidate_pool(
     return existing, added
 
 
+class RealtimeDeliveryTargetReached(Exception):
+    """The formal contact target is fulfilled; end discovery normally."""
+
+
 def process_new_candidate_identities(
     output: dict[str, dict[str, Any]],
     identities: list[str],
@@ -828,13 +893,30 @@ def process_new_candidate_identities(
     paused = False
     rate_limited_streak = 0
     for identity in identities:
+        if getattr(processor, "delivery_target_reached", lambda: False)():
+            raise RealtimeDeliveryTargetReached()
         candidate = output.get(identity)
         if not isinstance(candidate, dict):
             continue
         updated = processor.process(context, page, candidate)
         output[identity] = dict(updated)
         processed += 1
+        judgment = updated.get("jev_analysis") or {}
+        if judgment.get("action_required"):
+            status = judgment.get("http_status")
+            emit({"status": "jev_action_required", "http_status": status,
+                  "message": f"Jev 云复核被 HTTP {status} 阻止，已保存断点；请处理账户额度或权限后继续"})
+            raise RuntimeError(f"Jev 云复核 HTTP {status}：需要处理账户额度或权限，已保存断点")
+        if getattr(processor, "flow", None) is not None:
+            emit({"status": "realtime_creator_progress", "processed": processed,
+                  **processor.flow.summary()})
+        if getattr(processor, "delivery_target_reached", lambda: False)():
+            raise RealtimeDeliveryTargetReached()
         reason = compact(updated.get("realtime_flow_reason")).lower()
+        if "page crashed" in reason:
+            # Preserve this creator for retry, then reconnect the software's
+            # session instead of consuming every remaining row on a dead page.
+            raise RuntimeError("realtime_page_crashed")
         # 仅「每日配额耗尽」代表额度用尽，需要暂停整个流程。
         # 偶发「rate_limited」是单次频次抖动，跳过该达人继续即可；
         # 连续 3 次才升级为暂停，避免一次抖动就中断整轮采集。
@@ -849,6 +931,41 @@ def process_new_candidate_identities(
         else:
             rate_limited_streak = 0
     return {"processed": processed, "paused": paused}
+
+
+def resume_retry_candidates(output, processor, context, page, shop):
+    pending = []
+    for record in processor.flow.rows():
+        row = record.get("row") or {}
+        judgment = row.get("jev_analysis") or {}
+        failed_review = (record.get("state") == "evidence_reviewing"
+                         and judgment.get("error_type")
+                         and (judgment.get("retryable") is not False or judgment.get("action_required")))
+        if (record.get("state") == "retry_pending" or failed_review) and compact(row.get("shop")).upper() == shop:
+            identity = record["identity"]
+            output[identity] = dict(row)
+            pending.append(identity)
+    return process_new_candidate_identities(output, pending, processor, context, page)
+
+
+def resume_contact_candidates(output, processor, context, page, shop):
+    """Resume saved contact work in both keyword and structured discovery.
+
+    The flow ledger is authoritative even when a source-only replenishment
+    pool no longer contains the interrupted creator.
+    """
+    pending = []
+    for record in processor.flow.rows():
+        row = record.get("row") or {}
+        if (compact(row.get("shop")).upper() == shop
+                and record.get("state") in {"suitable", "contact_revealing", "plaintext_unique"}):
+            output[record["identity"]] = dict(row)
+            pending.append(record["identity"])
+    if pending:
+        from contact_shop_cooldown import shop_cooldown_until
+        if shop_cooldown_until(processor.output_dir, shop) > time.time():
+            return {"processed": 0, "paused": True}
+    return process_new_candidate_identities(output, pending, processor, context, page)
 
 
 def create_realtime_review_page(context: Any, browse_page: Any) -> tuple[Any, bool]:
@@ -869,12 +986,18 @@ def create_realtime_review_page(context: Any, browse_page: Any) -> tuple[Any, bo
 
 def restore_structured_browse_page(page: Any, strategy: dict[str, Any]) -> None:
     page.goto(BUYIN_URL, wait_until="domcontentloaded", timeout=45000)
-    page.locator("input[placeholder*='搜达人昵称']").first.wait_for(
-        state="visible", timeout=20000,
-    )
+    search = page.locator("input[placeholder*='达人']:visible").first
+    try:
+        search.wait_for(state="visible", timeout=20000)
+    except PlaywrightTimeoutError:
+        # A profile visit can redirect the same view through merchant SSO.
+        # Re-enter via this shop's official entry, never another shop's page.
+        assert_safe(page)
+        bootstrap_buyin_page(page.context, preferred_page=page)
+        search.wait_for(state="visible", timeout=20000)
     page.wait_for_timeout(500)
     assert_safe(page)
-    click_text(page, "重置")
+    (click_text(page, "重置筛选") or click_text(page, "重置"))
     page.wait_for_timeout(500)
     apply_strategy_filters(page, strategy)
     page.keyboard.press("Escape")
@@ -882,6 +1005,29 @@ def restore_structured_browse_page(page: Any, strategy: dict[str, Any]) -> None:
     trigger_structured_browse(page)
     page.wait_for_timeout(source_keyword_delay_ms(strategy))
     assert_safe(page)
+
+
+
+def resolve_structured_browse_request(page, strategy, request_bodies, payloads):
+    """Recover a missed SPA response using the same authenticated shop and filters."""
+    assert_safe(page)
+    assert_safe_payloads(payloads)
+    body = structured_browse_request_body(request_bodies)
+    if body:
+        return body
+    # The initial navigation can finish before the response listener attaches;
+    # unchanged filters/search may not produce another request. Re-enter while listening.
+    emit({"status": "collection_request_recovering",
+          "message": "列表请求未捕获，使用当前店铺重新加载筛选页并保留分页断点"})
+    restore_structured_browse_page(page, strategy)
+    for _ in range(10):
+        assert_safe(page)
+        assert_safe_payloads(payloads)
+        body = structured_browse_request_body(request_bodies)
+        if body:
+            return body
+        page.wait_for_timeout(1000)
+    raise RuntimeError("buyin_structured_browse_request_not_found")
 
 
 def filter_resumed_candidate_pool(
@@ -973,15 +1119,38 @@ def collect_shop(
         processed_keywords = 0
         keyword_batch_limit = source_max_keywords_per_run(strategy)
         try:
-            page.locator("input[placeholder*='搜达人昵称']").first.wait_for(state="visible", timeout=20000)
+            page.locator("input[placeholder*='达人']:visible").first.wait_for(state="visible", timeout=20000)
             page.wait_for_timeout(800)
             assert_safe(page)
-            click_text(page, "重置")
+            (click_text(page, "重置筛选") or click_text(page, "重置"))
             page.wait_for_timeout(800)
             applied = apply_strategy_filters(page, strategy)
             page.keyboard.press("Escape")
             page.wait_for_timeout(700)
-            emit({"status": "filters_applied", "shop": shop, "filters": applied})
+            emit({"status": "filter_controls_clicked", "shop": shop, "filters": applied, "verification": "clicked_only_not_confirmed"})
+
+            if realtime_processor is not None and realtime_page is not None:
+                retries = resume_retry_candidates(output, realtime_processor, context, realtime_page, shop)
+                if retries["processed"]:
+                    save_highwater(highwater_path, strategy, output, completed_keywords_by_shop)
+                    emit({"status": "realtime_retry_resumed", "shop": shop, **retries})
+                    if realtime_uses_browse_page:
+                        restore_structured_browse_page(page, strategy)
+                    if retries["paused"]:
+                        return True
+
+                resumed = resume_contact_candidates(output, realtime_processor, context, realtime_page, shop)
+                if resumed["processed"]:
+                    save_highwater(highwater_path, strategy, output, completed_keywords_by_shop)
+                    emit({"status": "realtime_pending_resumed", "shop": shop, **resumed})
+                    if realtime_uses_browse_page:
+                        restore_structured_browse_page(page, strategy)
+                if resumed["paused"]:
+                    from contact_shop_cooldown import shop_cooldown_until
+                    emit({"status": "pipeline_waiting_for_contact_quota", "shop": shop,
+                          "retry_after": shop_cooldown_until(highwater_path.parent, shop),
+                          "message": "联系方式暂受平台限制，保存断点后等待冷却"})
+                    return True
 
             for index, keyword in pending_shop_keywords(keywords, completed):
                 before = len(payloads)
@@ -1061,6 +1230,15 @@ def collect_shop(
     return False
 
 
+def structured_page_schedule(completed_pages: set[int], maximum_page: int) -> list[int]:
+    """Completed page numbers are checkpoints, not permanent creator identities."""
+    completed = sorted(page for page in completed_pages if 1 <= page <= maximum_page)
+    unseen = [page for page in range(1, maximum_page + 1) if page not in completed_pages]
+    # Recheck one old page per resumed batch; fresh pages retain priority after it.
+    # When all pages are old, revisit them instead of declaring an empty source.
+    return (completed[:1] + unseen) if unseen else completed
+
+
 def collect_shop_browse(
     endpoint: str,
     shop: str,
@@ -1073,7 +1251,14 @@ def collect_shop_browse(
 ) -> bool:
     """Collect from structured filters and pagination without search keywords."""
     completed_pages_by_shop = completed_pages_by_shop if completed_pages_by_shop is not None else {}
-    completed_pages = completed_pages_by_shop.setdefault(shop, set())
+    categories = CATEGORY_LABELS.get(compact(strategy.get("category")), [compact(strategy.get("category"))])
+    if len(categories)>1:
+        selected = min(categories, key=lambda label:len(completed_pages_by_shop.get(f"{shop}:{label}",set())))
+        strategy = {**strategy,"sourcePlatformCategory":selected}
+        checkpoint_shop = f"{shop}:{selected}"
+    else:
+        checkpoint_shop = shop
+    completed_pages = completed_pages_by_shop.setdefault(checkpoint_shop, set())
     with sync_playwright() as playwright:
         browser, context, _embedded_page = connect_shop(playwright.chromium, endpoint)
         page = bootstrap_buyin_page(context, preferred_page=_embedded_page)
@@ -1101,10 +1286,10 @@ def collect_shop_browse(
 
         page.on("response", record_response)
         try:
-            page.locator("input[placeholder*='搜达人昵称']").first.wait_for(state="visible", timeout=20000)
+            page.locator("input[placeholder*='达人']:visible").first.wait_for(state="visible", timeout=20000)
             page.wait_for_timeout(800)
             assert_safe(page)
-            click_text(page, "重置")
+            (click_text(page, "重置筛选") or click_text(page, "重置"))
             page.wait_for_timeout(800)
             applied = apply_strategy_filters(page, strategy)
             page.keyboard.press("Escape")
@@ -1113,20 +1298,51 @@ def collect_shop_browse(
             page.wait_for_timeout(source_keyword_delay_ms(strategy))
             assert_safe(page)
             assert_safe_payloads(payloads)
-            base_request = structured_browse_request_body(request_bodies)
-            if not base_request:
-                raise RuntimeError("buyin_structured_browse_request_not_found")
+            base_request = resolve_structured_browse_request(page, strategy, request_bodies, payloads)
             emit({
-                "status": "filters_applied", "shop": shop, "filters": applied,
+                "status": "filter_controls_clicked", "shop": shop, "filters": applied, "verification": "clicked_only_not_confirmed",
                 "source_discovery_mode": "structured_browse",
             })
+
+            if realtime_processor is not None and realtime_page is not None:
+                retries = resume_retry_candidates(output, realtime_processor, context, realtime_page, shop)
+                if retries["processed"]:
+                    save_highwater(highwater_path, strategy, output,
+                                   completed_pages_by_shop=completed_pages_by_shop)
+                    emit({"status": "realtime_retry_resumed", "shop": shop, **retries})
+                    if realtime_uses_browse_page:
+                        restore_structured_browse_page(page, strategy)
+                    if retries["paused"]:
+                        return True
+                resumed = resume_contact_candidates(output, realtime_processor, context, realtime_page, shop)
+                if resumed["processed"]:
+                    save_highwater(highwater_path, strategy, output,
+                                   completed_pages_by_shop=completed_pages_by_shop)
+                    emit({"status": "realtime_pending_resumed", "shop": shop, **resumed})
+                    if realtime_uses_browse_page:
+                        restore_structured_browse_page(page, strategy)
+                if resumed["paused"]:
+                    from contact_shop_cooldown import shop_cooldown_until
+                    emit({"status": "pipeline_waiting_for_contact_quota", "shop": shop,
+                          "retry_after": shop_cooldown_until(highwater_path.parent, shop),
+                          "message": "联系方式暂受平台限制，保存断点后等待冷却"})
+                    return True
 
             processed_pages = 0
             maximum_page = source_browse_max_pages(strategy)
             page_batch_limit = source_browse_pages_per_run(strategy)
-            for page_number in range(1, maximum_page + 1):
+            page_numbers = structured_page_schedule(completed_pages, maximum_page)
+            no_new_pages = 0
+            for page_number in page_numbers:
                 if page_number in completed_pages:
-                    continue
+                    # Reload the official filtered list, retaining this shop and
+                    # the confirmed category. Never clear the identity ledger.
+                    page.wait_for_timeout(max(8000, source_page_delay_ms(strategy)))
+                    restore_structured_browse_page(page, strategy)
+                    assert_safe_payloads(payloads)
+                    base_request = resolve_structured_browse_request(page, strategy, request_bodies, payloads)
+                    emit({"status": "collection_page_refresh", "shop": shop,
+                          "page": page_number, "category": strategy.get("sourcePlatformCategory") or strategy.get("category")})
                 fetched = fetch_search_page(page, base_request, page_number)
                 data = fetched.get("data") if isinstance(fetched.get("data"), dict) else {}
                 candidates = []
@@ -1144,6 +1360,7 @@ def collect_shop_browse(
                     break
                 identities_before = set(output)
                 output, accepted = merge_candidate_pool(output, candidates[:remaining], excluded)
+                no_new_pages = 0 if accepted else no_new_pages + 1
                 new_identities = [identity for identity in output if identity not in identities_before]
                 realtime_result = {"processed": 0, "paused": False}
                 if realtime_processor is not None and realtime_page is not None and new_identities:
@@ -1154,7 +1371,8 @@ def collect_shop_browse(
                         context=context,
                         page=realtime_page,
                     )
-                completed_pages.add(page_number)
+                if not realtime_result.get("paused"):
+                    completed_pages.add(page_number)
                 processed_pages += 1
                 save_highwater(
                     highwater_path, strategy, output,
@@ -1192,11 +1410,21 @@ def collect_shop_browse(
                         "source_discovery_mode": "structured_browse",
                         "reason": "realtime_contact_platform_pause",
                     })
-                    return True
+                    raise RuntimeError("realtime_platform_pause")
                 if len(output) >= shop_target:
                     break
+                if no_new_pages >= 3:
+                    emit({"status": "collection_source_refresh_wait", "shop": shop,
+                          "retry_after_seconds": 60,
+                          "message": "连续三次取页没有新身份，保留断点后退避等待"})
+                    page.wait_for_timeout(60000)
+                    assert_safe(page)
+                    return True
                 if not data.get("list") or data.get("has_more") is False:
-                    break
+                    # A changing recommendation feed can return new identities
+                    # on the same page. Bound retries by the normal batch limit.
+                    if processed_pages < page_batch_limit:
+                        page_numbers[processed_pages:] = [1] * (page_batch_limit - processed_pages)
                 page.wait_for_timeout(source_page_delay_ms(strategy))
                 assert_safe(page)
                 if processed_pages >= page_batch_limit:
@@ -1340,6 +1568,8 @@ def main() -> None:
     platform_paused = False
     rate_limited_streak = 0
     batch_checkpoint = False
+    page_crashed = False
+    filter_failed = False
     for active_index, (shop, endpoint, assigned) in enumerate(active_assignments):
         try:
             if endpoint_is_explicitly_logged_out(endpoint):
@@ -1358,8 +1588,29 @@ def main() -> None:
                 )
             if batch_checkpoint:
                 break
+        except RealtimeDeliveryTargetReached:
+            finish_collection(
+                output_dir, strategy, candidates, highwater_path,
+                completed_keywords_by_shop=completed_keywords_by_shop,
+                completed_pages_by_shop=completed_pages_by_shop,
+            )
+            emit({"status": "realtime_delivery_target_reached",
+                  "message": "正式名单已达到目标，进入交付收尾"})
+            return
         except Exception as exc:
             message = compact(exc)
+            if message.startswith(("buyin_filter_not_found:", "buyin_category_", "buyin_sale_type_not_confirmed:", "buyin_content_topic_not_confirmed:")):
+                filter_failed = True
+                emit({"status": "platform_filter_failed", "shop": shop, "message": message[:500]})
+                break
+            if message == "realtime_page_crashed":
+                page_crashed = True
+                emit({"status": "shop_error", "shop": shop, "message": message})
+                break
+            if message == "realtime_platform_pause":
+                platform_paused = True
+                emit({"status": "rate_limited", "shop": shop, "message": "平台连续限制，已保存断点并等待退避"})
+                break
             status = "rate_limited" if any(marker in message for marker in SAFETY_MARKERS) else "shop_error"
             # 单次 rate_limited 属频次抖动，跳过该店铺继续；连续 3 次才判定平台真限制。
             if status == "rate_limited":
@@ -1376,10 +1627,15 @@ def main() -> None:
         strategy,
         candidates,
         highwater_path,
-        emit_status="collection_finished" if complete and not platform_paused else "collection_checkpoint_saved",
+        emit_status="collection_finished" if complete and not platform_paused and not page_crashed and not filter_failed else "collection_checkpoint_saved",
         completed_keywords_by_shop=completed_keywords_by_shop,
         completed_pages_by_shop=completed_pages_by_shop,
     )
+    if filter_failed:
+        emit({"status": "collection_filter_blocked", "message": "后台筛选未确认，已保存断点并停止；修复后继续，不按来源耗尽处理"})
+        raise SystemExit(12)
+    if page_crashed:
+        raise SystemExit(7)
     if platform_paused:
         emit({
             "status": "platform_paused",
@@ -1401,7 +1657,7 @@ def main() -> None:
             "status": "collection_incomplete",
             "candidate_count": len(candidates),
             "target_count": target,
-            "message": "当前关键词候选不足，已保存高水位",
+            "message": "当前来源候选不足，已保存高水位",
         })
         raise SystemExit(7)
 
