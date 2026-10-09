@@ -579,3 +579,53 @@ it("当前任务往期可记录修订，其他任务历史仅查看避免写错�
  state.task.id="history-edit66";setCurrentPage("creators");const root=document.createElement("div");document.body.replaceChildren(root);renderBootstrap(root,state,{...handlers,onSaveContactCorrection:vi.fn()});
  const buttons=[...root.querySelectorAll<HTMLButtonElement>("button")].filter(b=>b.textContent==="查看详情");buttons[0].click();expect(document.querySelector("dialog")?.textContent).toContain("人工修订联系方式与历史");document.querySelector("dialog")?.remove();buttons[1].click();expect(document.querySelector("dialog")?.textContent).not.toContain("人工修订联系方式与历史");
 });
+
+
+describe("Jev首次配置与未保存修改保护", () => {
+ it("只填Key即可配置，失败保留输入，不允许测试旧配置", async () => {
+  setCurrentPage("models");
+  const save=vi.fn().mockRejectedValue(new Error("failed"));const test=vi.fn();
+  const root=document.createElement("div");document.body.replaceChildren(root);
+  renderBootstrap(root,makeBootstrap({jevStatus:{enabled:true,configured:true,decisionMode:true,model:"jev-latest"}}),{...handlers,onSaveJevSettings:save,onTestJevConnection:test});
+  expect(root.textContent).toContain("调用地址（已内置，无需填写）");
+  const key=root.querySelector<HTMLInputElement>('[aria-label="Jev API Key"]')!;
+  const saveButton=[...root.querySelectorAll<HTMLButtonElement>("button")].find(b=>b.textContent==="保存 Jev 配置")!;
+  const testButton=[...root.querySelectorAll<HTMLButtonElement>("button")].find(b=>b.textContent==="测试模型（单次云端调用）")!;
+  key.value="new-test-only-key";key.dispatchEvent(new Event("input"));
+  expect(testButton.disabled).toBe(true);testButton.click();expect(test).not.toHaveBeenCalled();
+  saveButton.click();await vi.waitFor(()=>expect(root.textContent).toContain("保存失败，输入内容已保留"));
+  expect(key.value).toBe("new-test-only-key");expect(testButton.disabled).toBe(true);
+  save.mockResolvedValue(undefined);saveButton.click();await vi.waitFor(()=>expect(key.value).toBe(""));
+  expect(save).toHaveBeenLastCalledWith("new-test-only-key","jev-latest");expect(testButton.disabled).toBe(false);
+ });
+ it("测试期间锁定配置，修改模型必须先保存", async () => {
+  setCurrentPage("models");let finish!:()=>void;
+  const test=vi.fn(()=>new Promise<void>(resolve=>finish=resolve));const save=vi.fn();
+  const root=document.createElement("div");document.body.replaceChildren(root);
+  renderBootstrap(root,makeBootstrap({jevStatus:{enabled:true,configured:true,decisionMode:true,model:"jev-latest"}}),{...handlers,onSaveJevSettings:save,onTestJevConnection:test});
+  const model=root.querySelector<HTMLInputElement>('[aria-label="Jev 模型"]')!;
+  const testButton=[...root.querySelectorAll<HTMLButtonElement>("button")].find(b=>b.textContent==="测试模型（单次云端调用）")!;
+  const saveButton=[...root.querySelectorAll<HTMLButtonElement>("button")].find(b=>b.textContent==="保存 Jev 配置")!;
+  testButton.click();expect(model.disabled).toBe(true);expect(saveButton.disabled).toBe(true);
+  saveButton.click();testButton.click();expect(test).toHaveBeenCalledOnce();expect(save).not.toHaveBeenCalled();
+  finish();await vi.waitFor(()=>expect(model.disabled).toBe(false));
+  model.value="jev-preview";model.dispatchEvent(new Event("input"));expect(testButton.disabled).toBe(true);
+  model.value="jev-latest";model.dispatchEvent(new Event("input"));expect(testButton.disabled).toBe(false);
+ });
+});
+
+it("新电脑默认模型可用，只填Key保存，并在保存期间阻止重复提交", async () => {
+ setCurrentPage("models");let finish!:()=>void;
+ const save=vi.fn(()=>new Promise<void>(resolve=>finish=resolve));const test=vi.fn();
+ const root=document.createElement("div");document.body.replaceChildren(root);
+ renderBootstrap(root,makeBootstrap({jevStatus:{enabled:false,configured:false,decisionMode:false}}),{...handlers,onSaveJevSettings:save,onTestJevConnection:test});
+ const key=root.querySelector<HTMLInputElement>('[aria-label="Jev API Key"]')!;
+ const model=root.querySelector<HTMLInputElement>('[aria-label="Jev 模型"]')!;
+ const saveButton=[...root.querySelectorAll<HTMLButtonElement>("button")].find(b=>b.textContent==="保存 Jev 配置")!;
+ const testButton=[...root.querySelectorAll<HTMLButtonElement>("button")].find(b=>b.textContent==="测试模型（单次云端调用）")!;
+ expect(model.value).toBe("jev-latest");expect(testButton.disabled).toBe(true);
+ key.value="fresh-test-only";key.dispatchEvent(new Event("input"));saveButton.click();saveButton.click();
+ expect(save).toHaveBeenCalledOnce();expect(save).toHaveBeenCalledWith("fresh-test-only","jev-latest");
+ expect(testButton.disabled).toBe(true);expect(key.disabled).toBe(true);
+ finish();await vi.waitFor(()=>expect(testButton.disabled).toBe(false));expect(key.value).toBe("");expect(test).not.toHaveBeenCalled();
+});

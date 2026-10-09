@@ -610,12 +610,42 @@ export function modelsPage(state: Bootstrap, handlers: PageHandlers): HTMLElemen
   const jevKey = h("input", { type: "password", autocomplete: "off", "aria-label": "Jev API Key", placeholder: state.jevStatus?.configured ? "留空保留现有 Key" : "输入 Jev API Key" }) as HTMLInputElement;
   const jevModel = h("input", { "aria-label": "Jev 模型", list: "jev-model-options", value: state.jevStatus?.model || "jev-latest" }) as HTMLInputElement;
   const modelOptions = h("datalist", { id: "jev-model-options" }, ["jev-latest", "jev-preview", "jev-1.13.0"].map(value => h("option", { value })));
+  const configHint = h("p", { class: "empty-hint", role: "status", "aria-live": "polite", text: "调用地址和默认模型已内置。只需填写 API Key，保存后测试连接；已配置时不用重复输入。" });
+  let saving = false, testing = false;
+  let savedModel = state.jevStatus?.model || "jev-latest";
+  let configured = Boolean(state.jevStatus?.configured);
+  const hasUnsavedChanges = () => Boolean(jevKey.value.trim()) || jevModel.value.trim() !== savedModel;
+  const updateControls = () => {
+    jevSave.disabled = saving || testing;
+    jevKey.disabled = saving || testing;
+    jevModel.disabled = saving || testing;
+    testButton.disabled = saving || testing || !configured || hasUnsavedChanges();
+    testButton.title = hasUnsavedChanges() ? "请先保存修改，再测试新配置" : "测试已保存配置，会发起一次云端调用";
+  };
   const jevSave = h("button", { type: "button", onclick: async () => {
-    jevSave.disabled = true;
-    try { await handlers.onSaveJevSettings?.(jevKey.value, jevModel.value); jevKey.value = ""; }
-    finally { jevSave.disabled = false; }
+    if (saving || testing) return;
+    saving = true; updateControls(); jevSave.textContent = "正在保存…";
+    try {
+      await handlers.onSaveJevSettings?.(jevKey.value, jevModel.value);
+      savedModel = jevModel.value.trim() || "jev-latest";
+      configured = true; jevKey.value = "";
+      configHint.textContent = "配置已保存。点击测试连接，确认本机可以调用；测试会产生一次云端调用。";
+    } catch {
+      configHint.textContent = "保存失败，输入内容已保留。请检查提示后重试；尚未使用本次修改。";
+    } finally { saving = false; jevSave.textContent = "保存 Jev 配置"; updateControls(); }
   }, text: "保存 Jev 配置" }) as HTMLButtonElement;
-  const testButton=h("button",{type:"button",text:"测试模型（单次云端调用）",disabled:!state.jevStatus?.configured,onclick:async()=>{testButton.disabled=true;testButton.textContent="正在测试…";try{await handlers.onTestJevConnection?.();}finally{testButton.disabled=false;testButton.textContent="测试模型（单次云端调用）";}}}) as HTMLButtonElement;
+  const testButton = h("button", { type: "button", text: "测试模型（单次云端调用）", onclick: async () => {
+    if (saving || testing || !configured || hasUnsavedChanges()) return;
+    testing = true; updateControls(); testButton.textContent = "正在测试…";
+    try { await handlers.onTestJevConnection?.(); }
+    catch { configHint.textContent = "测试未完成，请检查网络、账户额度和错误提示后重试；已保存配置保留。"; }
+    finally { testing = false; testButton.textContent = "测试模型（单次云端调用）"; updateControls(); }
+  } }) as HTMLButtonElement;
+  for (const input of [jevKey, jevModel]) input.addEventListener("input", () => {
+    configHint.textContent = hasUnsavedChanges() ? "配置有未保存的修改，请先保存再测试；测试不会使用未保存的内容。" : "调用地址和默认模型已内置。只需填写 API Key，保存后测试连接；已配置时不用重复输入。";
+    updateControls();
+  });
+  updateControls();
   const status = state.jevStatus;
   const usage = status?.usage;
   const latestBlock = [...state.runHistory].find(r => r.status === "jev_action_required");
@@ -627,7 +657,9 @@ export function modelsPage(state: Bootstrap, handlers: PageHandlers): HTMLElemen
   return h("div", { class: "settings-page" }, [
     panel("手卡理解 · 千问",rowItem("用途","理解品牌手卡，给出可编辑候选条件；确认后才生效"),rowItem("模型",state.qwenStatus?.model||"尚未读取"),rowItem("连接状态",state.qwenStatus?.configured?"已读取现有配置，真实调用仍需验证":"未读取到已有千问配置；不会借用Jev密钥"),h("p",{text:"千问负责手卡理解，Jev负责快速达人适配判断。现有凭据不重设。"})),
     panel("分析模型配置 · Jev",
+      configHint,
       rowItem("服务", "TypeSafe Jev 云端达人分析"),
+      rowItem("调用地址（已内置，无需填写）", "https://api.typesafe.ai/v1/systemone"),
       rowItem("配置状态", status?.configured && status?.enabled ? "已配置并启用（不代表调用已验证）" : "尚未配置或未启用"),
       rowItem("凭据保护", status?.credentialProtection || "未知"),
       rowItem("配置模型", status?.model || "jev-latest"),
